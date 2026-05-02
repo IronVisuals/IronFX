@@ -279,7 +279,7 @@ var IronFX = (function () {
   }
 
   function applyEffect(payloadStr) {
-    var result = { clipsAffected: 0, skipped: 0, warnings: [], error: null };
+    var result = { clipsAffected: 0, partialAffected: 0, skipped: 0, warnings: [], error: null };
     var payload;
     var undoStarted = false;
 
@@ -308,19 +308,25 @@ var IronFX = (function () {
 
       for (var i = 0; i < refs.length; i++) {
         var ok = false;
+        var partial = false;
         if (payload.isPreset && payload.presetPath) {
-          ok = _applyPresetToRef(refs[i], payload, result.warnings);
+          var presetState = _applyPresetToRef(refs[i], payload, result.warnings);
+          ok = presetState === 'applied';
+          partial = presetState === 'partial';
         } else {
           ok = _applyNativeEffectToRef(refs[i], payload, result.warnings);
         }
         if (ok) result.clipsAffected++;
+        else if (partial) result.partialAffected++;
         else result.skipped++;
       }
 
       if (undoStarted) _endUndo();
       undoStarted = false;
 
-      if (result.clipsAffected === 0) {
+      if (result.clipsAffected === 0 && result.partialAffected > 0) {
+        result.error = 'Preset could only be applied partially. The base effect was added, but saved preset settings/keyframes were not applied by Premiere scripting.';
+      } else if (result.clipsAffected === 0) {
         result.error = 'Nothing was applied. Check clip type, effect name, preset file, or installation.';
       }
     } catch (err) {
@@ -416,6 +422,10 @@ var IronFX = (function () {
         if (qe.project && typeof qe.project.getVideoEffectByName === 'function') {
           var effect = qe.project.getVideoEffectByName(names[i]);
           if (effect) return effect;
+          try {
+            effect = qe.project.getVideoEffectByName(names[i], true);
+            if (effect) return effect;
+          } catch (ignoreVideoFuzzy) {}
         }
       } catch (e) {}
     }
@@ -429,6 +439,10 @@ var IronFX = (function () {
         if (qe.project && typeof qe.project.getAudioEffectByName === 'function') {
           var effect = qe.project.getAudioEffectByName(names[i]);
           if (effect) return effect;
+          try {
+            effect = qe.project.getAudioEffectByName(names[i], true);
+            if (effect) return effect;
+          } catch (ignoreAudioFuzzy) {}
         }
       } catch (e) {}
     }
@@ -443,6 +457,7 @@ var IronFX = (function () {
     if (payload.matchName) {
       var simplified = String(payload.matchName).replace(/^AEVideoFilter\s+/i, '').replace(/^AE\.\s*/i, '').replace(/^PR\.\s*/i, '').replace(/^ADBE\s+/i, '');
       _pushUniqueString(out, simplified);
+      _pushUniqueString(out, 'AE.' + simplified);
     }
     return out;
   }
@@ -470,13 +485,13 @@ var IronFX = (function () {
 
   function _applyPresetToRef(ref, payload, warnings) {
     var wantedType = payload.type || 'video';
-    if (wantedType === 'audio' && ref.kind !== 'audio') return false;
-    if (wantedType !== 'audio' && ref.kind !== 'video') return false;
+    if (wantedType === 'audio' && ref.kind !== 'audio') return 'none';
+    if (wantedType !== 'audio' && ref.kind !== 'video') return 'none';
 
     var f = new File(payload.presetPath);
     if (!f.exists) {
       warnings.push('Preset file not found: ' + payload.presetPath);
-      return false;
+      return 'none';
     }
 
     try {
@@ -484,27 +499,28 @@ var IronFX = (function () {
       var qeSeq = qe.project.getActiveSequence();
       var qeClip = qeSeq ? _getQEClipForRef(qeSeq, ref) : null;
       if (qeClip) {
-        var beforeCount = _componentCount(ref.clip);
-
-        if (_tryQEApplyPresetFile(qeClip, f, payload, warnings)) {
-          if (_componentCountIncreased(ref.clip, beforeCount)) return true;
-          warnings.push('QE preset file call returned, but no component was added; trying installed preset lookup.');
+        if (_tryPresetAsNamedEffect(qeClip, payload, ref.kind, ref.clip, warnings)) {
+          return 'applied';
         }
 
-        if (_tryPresetAsNamedEffect(qeClip, payload, ref.kind, warnings)) {
-          return true;
+        if (_tryQEApplyPresetFile(qeClip, f, payload, ref.clip, warnings)) {
+          return 'applied';
+        }
+
+        if (_applyPresetBaseEffectsFromFile(qeClip, f, payload, ref.kind, ref.clip, warnings)) {
+          return 'partial';
         }
       }
     } catch (e) {
       warnings.push('QE preset apply failed for ' + payload.presetName + ': ' + e.toString());
     }
 
-    if (_tryComponentPresetFallback(ref.clip, f, payload, warnings)) return true;
+    if (_tryComponentPresetFallback(ref.clip, f, payload, warnings)) return 'applied';
 
-    return false;
+    return 'none';
   }
 
-  function _tryQEApplyPresetFile(qeClip, file, payload, warnings) {
+  function _tryQEApplyPresetFile(qeClip, file, payload, clip, warnings) {
     var path = file.fsName;
     var name = payload.presetName || payload.name || '';
     var attempts = [
@@ -517,6 +533,7 @@ var IronFX = (function () {
     ];
     var exposedMethod = false;
     var lastError = '';
+    var unchangedCalls = 0;
 
     for (var i = 0; i < attempts.length; i++) {
       var attempt = attempts[i];
@@ -524,8 +541,10 @@ var IronFX = (function () {
       exposedMethod = true;
 
       try {
+        var before = _componentSignature(clip);
         var ret = qeClip[attempt.method].apply(qeClip, attempt.args);
-        if (ret !== false) return true;
+        if (ret !== false && _componentSignatureChanged(clip, before)) return true;
+        unchangedCalls++;
       } catch (e) {
         lastError = e.toString();
       }
@@ -533,13 +552,15 @@ var IronFX = (function () {
 
     if (!exposedMethod) {
       warnings.push('This Premiere QE clip does not expose applyPreset/addPreset for preset files.');
+    } else if (unchangedCalls > 0) {
+      warnings.push('QE preset file call returned without changing the clip.');
     } else if (lastError) {
       warnings.push('QE preset file call failed: ' + lastError);
     }
     return false;
   }
 
-  function _tryPresetAsNamedEffect(qeClip, payload, kind, warnings) {
+  function _tryPresetAsNamedEffect(qeClip, payload, kind, clip, warnings) {
     var names = [];
     _pushUniqueString(names, payload.presetName);
     _pushUniqueString(names, payload.name);
@@ -552,13 +573,14 @@ var IronFX = (function () {
       if (!effect) continue;
 
       try {
+        var before = _componentSignature(clip);
         if (kind === 'audio' && typeof qeClip.addAudioEffect === 'function') {
           qeClip.addAudioEffect(effect);
-          return true;
+          if (_componentSignatureChanged(clip, before)) return true;
         }
         if (kind !== 'audio' && typeof qeClip.addVideoEffect === 'function') {
           qeClip.addVideoEffect(effect);
-          return true;
+          if (_componentSignatureChanged(clip, before)) return true;
         }
       } catch (e) {
         warnings.push('Installed preset lookup failed for ' + names[i] + ': ' + e.toString());
@@ -588,8 +610,9 @@ var IronFX = (function () {
 
       for (var a = 0; a < args.length; a++) {
         try {
+          var before = _componentSignature(clip);
           var ret = clip.components[method].apply(clip.components, args[a]);
-          if (ret !== false) return true;
+          if (ret !== false && _componentSignatureChanged(clip, before)) return true;
         } catch (e) {
           lastError = e.toString();
         }
@@ -605,20 +628,143 @@ var IronFX = (function () {
     return false;
   }
 
-  function _componentCount(clip) {
-    try {
-      if (clip && clip.components && typeof clip.components.numItems !== 'undefined') {
-        return Number(clip.components.numItems);
+  function _applyPresetBaseEffectsFromFile(qeClip, file, payload, kind, clip, warnings) {
+    var effects = _extractEffectRefsFromPresetFile(file, kind, warnings);
+    if (!effects.length) return false;
+
+    var changed = false;
+    for (var i = 0; i < effects.length; i++) {
+      var effectPayload = {
+        name: effects[i].displayName || effects[i].matchName,
+        matchName: effects[i].matchName
+      };
+      var effect = kind === 'audio' ? _findAudioEffect(effectPayload) : _findVideoEffect(effectPayload);
+      if (!effect) {
+        warnings.push('Could not resolve preset base effect: ' + effects[i].matchName);
+        continue;
       }
-    } catch (e) {}
-    return -1;
+
+      try {
+        var before = _componentSignature(clip);
+        if (kind === 'audio' && typeof qeClip.addAudioEffect === 'function') {
+          qeClip.addAudioEffect(effect);
+        } else if (kind !== 'audio' && typeof qeClip.addVideoEffect === 'function') {
+          qeClip.addVideoEffect(effect);
+        }
+        if (_componentSignatureChanged(clip, before)) changed = true;
+      } catch (e) {
+        warnings.push('Could not add preset base effect ' + effects[i].matchName + ': ' + e.toString());
+      }
+    }
+
+    if (changed) {
+      warnings.push('Only the base effect(s) from the preset file were added; saved parameter values/keyframes were not applied.');
+    }
+
+    return changed;
   }
 
-  function _componentCountIncreased(clip, beforeCount) {
-    if (beforeCount < 0) return true;
-    var afterCount = _componentCount(clip);
-    if (afterCount < 0) return true;
-    return afterCount > beforeCount;
+  function _extractEffectRefsFromPresetFile(file, kind, warnings) {
+    var text = _readFileText(file, warnings);
+    var out = [];
+    var seen = {};
+    if (!text) return out;
+
+    var videoGuid = '228cda18-3625-4d2d-951e-348879e4ed93';
+    var audioGuid = '80b8e3d5-6dca-4195-aefb-cb5f407ab009';
+    var guid = kind === 'audio' ? audioGuid : videoGuid;
+    var re = new RegExp(guid + '\\s+\\d+\\s+((?:AE|PR|BE|ADBE)\\.[\\s\\S]{2,120}?)\\s+\\d+\\s+\\1\\s+false\\s+([\\s\\S]{2,80}?)\\s+false', 'ig');
+    var m;
+
+    while ((m = re.exec(text)) !== null) {
+      var matchName = _cleanPresetName(m[1]);
+      var displayName = _cleanPresetName(m[2]);
+      var key = matchName + '::' + displayName;
+
+      if (_looksLikeEffectMatchName(matchName) && !seen[key]) {
+        seen[key] = true;
+        out.push({ matchName: matchName, displayName: displayName });
+      }
+      if (out.length > 50) break;
+    }
+
+    return out;
+  }
+
+  function _looksLikeEffectMatchName(value) {
+    var s = _trim(value);
+    if (!s || s.length > 140) return false;
+    return /^(AE|PR|BE|ADBE)\./i.test(s);
+  }
+
+  function _componentSignatureChanged(clip, before) {
+    try { $.sleep(90); } catch (e) {}
+    return _componentSignature(clip) !== before;
+  }
+
+  function _componentSignature(clip) {
+    var parts = [];
+    try {
+      if (!clip || !clip.components) return 'no-components';
+
+      var comps = clip.components;
+      var count = Number(comps.numItems || 0);
+      parts.push('count=' + count);
+
+      for (var i = 0; i < count; i++) {
+        var comp = comps[i];
+        if (!comp) continue;
+
+        parts.push('component=' + _safeProp(comp, 'displayName') + '|' + _safeProp(comp, 'matchName'));
+        var props = comp.properties;
+        var propCount = props ? Number(props.numItems || props.length || 0) : 0;
+        parts.push('props=' + propCount);
+
+        for (var p = 0; p < propCount && p < 80; p++) {
+          var param = props[p];
+          if (!param) continue;
+          parts.push('param=' + _safeProp(param, 'displayName') + ':' + _paramValueSignature(param));
+        }
+      }
+    } catch (e) {
+      parts.push('signature-error=' + e.toString());
+    }
+    return parts.join('\n');
+  }
+
+  function _safeProp(obj, prop) {
+    try {
+      if (obj && typeof obj[prop] !== 'undefined') return String(obj[prop]);
+    } catch (e) {}
+    return '';
+  }
+
+  function _paramValueSignature(param) {
+    var out = [];
+    try {
+      if (param && typeof param.getValue === 'function') out.push('v=' + _simpleValue(param.getValue()));
+    } catch (e1) {}
+    try {
+      if (param && typeof param.isTimeVarying === 'function') out.push('tv=' + param.isTimeVarying());
+    } catch (e2) {}
+    try {
+      if (param && typeof param.getKeys === 'function') out.push('keys=' + _simpleValue(param.getKeys()));
+    } catch (e3) {}
+    return out.join(',');
+  }
+
+  function _simpleValue(value) {
+    try {
+      if (value === null || typeof value === 'undefined') return '';
+      if (value instanceof Array) return '[' + value.join(',') + ']';
+      if (typeof value === 'object') {
+        if (typeof value.seconds !== 'undefined') return String(value.seconds);
+        if (typeof value.ticks !== 'undefined') return String(value.ticks);
+      }
+      return String(value);
+    } catch (e) {
+      return '[unreadable]';
+    }
   }
 
   function _getSelectedClipRefs(seq) {
@@ -733,10 +879,26 @@ var IronFX = (function () {
     return JSON.stringify(result);
   }
 
+  function keepLoaded() {
+    var result = { ok: true, warnings: [] };
+    try {
+      if (app && typeof app.setExtensionPersistent === 'function') {
+        app.setExtensionPersistent('com.ironfx.panel', 1);
+      } else {
+        result.warnings.push('app.setExtensionPersistent is unavailable in this host.');
+      }
+    } catch (e) {
+      result.ok = false;
+      result.warnings.push(e.toString());
+    }
+    return JSON.stringify(result);
+  }
+
   return {
     getUserPresets: getUserPresets,
     applyEffect: applyEffect,
-    getSelectionInfo: getSelectionInfo
+    getSelectionInfo: getSelectionInfo,
+    keepLoaded: keepLoaded
   };
 
 })();

@@ -104,6 +104,19 @@ CSInterface.prototype.closeExtension = function () {
 };
 
 /**
+ * Ask CEP to open another extension from the same bundle.
+ * @param {string} extensionId
+ * @param {string} params
+ */
+CSInterface.prototype.requestOpenExtension = function (extensionId, params) {
+  if (this._native && typeof this._native.requestOpenExtension === 'function') {
+    this._native.requestOpenExtension(extensionId, params || '');
+    return true;
+  }
+  return false;
+};
+
+/**
  * Set the panel window title.
  * @param {string} title
  */

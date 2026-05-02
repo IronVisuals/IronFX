@@ -8,16 +8,18 @@
  * - Safer preset indexing call with custom folders passed to ExtendScript.
  */
 
-/* global CSInterface, EffectsSearch, BUILT_IN_EFFECTS */
+/* global CSInterface, EffectsSearch, BUILT_IN_EFFECTS, SystemPath */
 
 (function () {
   'use strict';
 
   var SETTINGS_KEY = 'ironfx.settings.v2';
   var POPUP_EXTENSION_ID = 'com.ironfx.popup';
+  var BRIDGE_PORT = 32178;
   var DEFAULT_SETTINGS = {
     shortcut: 'Ctrl+Space',
-    presetDirs: []
+    presetDirs: [],
+    autoStartHotkeyHelper: true
   };
 
   var cs = new CSInterface();
@@ -29,6 +31,8 @@
   var settings = loadSettings();
   var captureMode = false;
   var isPopupMode = false;
+  var bridgeServer = null;
+  var externalHotkeyProcessStarted = false;
 
   var $input = document.getElementById('search-input');
   var $list = document.getElementById('results-list');
@@ -60,6 +64,8 @@
     document.body.classList.toggle('popup-mode', isPopupMode);
     applySettingsToUI();
     bindEvents();
+    keepExtensionLoaded();
+    startHotkeyBridge();
     loadPresets();
     startClipPoll();
     focusSearch(true);
@@ -89,6 +95,9 @@
     }
     if (value && value.presetDirs && value.presetDirs.length) {
       out.presetDirs = uniqueStrings(value.presetDirs);
+    }
+    if (value && typeof value.autoStartHotkeyHelper === 'boolean') {
+      out.autoStartHotkeyHelper = value.autoStartHotkeyHelper;
     }
     return out;
   }
@@ -381,6 +390,14 @@
         return;
       }
 
+      if (res.partialAffected && !res.clipsAffected) {
+        setStatus('Preset partially applied; settings/keyframes unsupported', 'error');
+        console.warn('[IronFX] partial preset apply:', res);
+        setTimeout(function () { setStatus('Ready', 'idle'); }, 6500);
+        updateClipStatus();
+        return;
+      }
+
       if (res.error) {
         setStatus(formatApplyError(res), 'error');
         console.error('[IronFX] apply error:', res);
@@ -405,6 +422,160 @@
       msg += ' (' + String(warnings[0]) + ')';
     }
     return 'Error: ' + msg;
+  }
+
+  function keepExtensionLoaded() {
+    try {
+      cs.evalScript('IronFX.keepLoaded()');
+    } catch (e) {}
+  }
+
+  function startHotkeyBridge() {
+    if (isPopupMode || bridgeServer) return;
+
+    var nodeRequire = getNodeRequire();
+    if (!nodeRequire) {
+      console.warn('[IronFX] Node.js is unavailable; external hotkey bridge cannot start.');
+      return;
+    }
+
+    try {
+      var http = nodeRequire('http');
+      bridgeServer = http.createServer(function (req, res) {
+        var url = String(req.url || '/');
+        setBridgeHeaders(res);
+
+        if (req.method === 'OPTIONS') {
+          res.statusCode = 204;
+          res.end();
+          return;
+        }
+
+        if (url.indexOf('/health') === 0) {
+          res.end(JSON.stringify({ ok: true, app: 'IronFX' }));
+          return;
+        }
+
+        if (url.indexOf('/open') === 0) {
+          openFromExternalHotkey(res);
+          return;
+        }
+
+        res.statusCode = 404;
+        res.end('not_found');
+      });
+
+      bridgeServer.on('error', function (err) {
+        console.warn('[IronFX] hotkey bridge failed:', err && err.message ? err.message : err);
+        startExternalHotkeyHelper(nodeRequire);
+      });
+
+      bridgeServer.listen(BRIDGE_PORT, '127.0.0.1', function () {
+        console.log('[IronFX] hotkey bridge listening on 127.0.0.1:' + BRIDGE_PORT);
+        startExternalHotkeyHelper(nodeRequire);
+      });
+    } catch (e) {
+      bridgeServer = null;
+      console.warn('[IronFX] could not start hotkey bridge:', e);
+      startExternalHotkeyHelper(nodeRequire);
+    }
+  }
+
+  function startExternalHotkeyHelper(nodeRequire) {
+    if (isPopupMode || externalHotkeyProcessStarted || !settings.autoStartHotkeyHelper) return;
+    externalHotkeyProcessStarted = true;
+
+    try {
+      var os = nodeRequire('os');
+      if (!os || os.platform() !== 'win32') return;
+
+      var childProcess = nodeRequire('child_process');
+      var path = nodeRequire('path');
+      var extensionPath = '';
+
+      try {
+        extensionPath = cs.getSystemPath(SystemPath.EXTENSION);
+      } catch (e1) {}
+
+      if (!extensionPath) return;
+
+      var scriptPath = path.join(extensionPath, 'tools', 'IronFXHotkey.ps1');
+      var child = childProcess.spawn('powershell.exe', [
+        '-NoProfile',
+        '-ExecutionPolicy', 'Bypass',
+        '-WindowStyle', 'Hidden',
+        '-File', scriptPath,
+        '-Port', String(BRIDGE_PORT),
+        '-Quiet'
+      ], {
+        cwd: extensionPath,
+        detached: true,
+        stdio: 'ignore',
+        windowsHide: true
+      });
+
+      if (child && typeof child.unref === 'function') child.unref();
+      console.log('[IronFX] external hotkey helper autostart requested.');
+    } catch (e2) {
+      console.warn('[IronFX] could not autostart external hotkey helper:', e2);
+    }
+  }
+
+  function getNodeRequire() {
+    try {
+      if (typeof require === 'function') return require;
+      if (window.cep_node && typeof window.cep_node.require === 'function') {
+        return window.cep_node.require;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function setBridgeHeaders(res) {
+    try {
+      res.setHeader('Access-Control-Allow-Origin', '*');
+      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,OPTIONS');
+      res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+      res.setHeader('Content-Type', 'application/json; charset=utf-8');
+    } catch (e) {}
+  }
+
+  function openFromExternalHotkey(res) {
+    cs.evalScript('IronFX.getSelectionInfo()', function (raw) {
+      var info = {};
+      try {
+        info = JSON.parse(raw || '{}');
+      } catch (e) {}
+
+      if (!info.count) {
+        setStatus('No clip selected', 'error');
+        setTimeout(function () { setStatus('Ready', 'idle'); }, 2200);
+        res.statusCode = 409;
+        res.end(JSON.stringify({ ok: false, error: 'no_clip_selected' }));
+        return;
+      }
+
+      var opened = requestPopupOpen();
+      if (!opened) openIronFXPopup();
+      res.end(JSON.stringify({ ok: true, openedPopup: opened }));
+    });
+  }
+
+  function requestPopupOpen() {
+    try {
+      if (cs && typeof cs.requestOpenExtension === 'function') {
+        return cs.requestOpenExtension(POPUP_EXTENSION_ID, 'source=hotkey');
+      }
+    } catch (e1) {}
+
+    try {
+      if (cs && cs._native && typeof cs._native.requestOpenExtension === 'function') {
+        cs._native.requestOpenExtension(POPUP_EXTENSION_ID, 'source=hotkey');
+        return true;
+      }
+    } catch (e2) {}
+
+    return false;
   }
 
   function startClipPoll() {
