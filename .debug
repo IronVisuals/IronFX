@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ExtensionList>
+  <Extension Id="com.ironfx.panel">
+    <HostList>
+      <!-- Remote DevTools on port 8099 — open chrome://inspect in Chrome -->
+      <Host Name="PPRO" Port="8099"/>
+    </HostList>
+  </Extension>
+</ExtensionList>

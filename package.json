@@ -1,0 +1,13 @@
+{
+  "name": "ironfx",
+  "version": "1.0.0",
+  "description": "IronFX — fast effects & preset search panel for Adobe Premiere Pro",
+  "author": "IronVisuals",
+  "license": "MIT",
+  "scripts": {
+    "link:win": "mklink /J \"%APPDATA%\\Adobe\\CEP\\extensions\\com.ironfx.plugin\" \"%CD%\"",
+    "link:mac": "ln -sf \"$(pwd)\" \"$HOME/Library/Application Support/Adobe/CEP/extensions/com.ironfx.plugin\"",
+    "unlink:win": "rmdir \"%APPDATA%\\Adobe\\CEP\\extensions\\com.ironfx.plugin\"",
+    "unlink:mac": "rm \"$HOME/Library/Application Support/Adobe/CEP/extensions/com.ironfx.plugin\""
+  }
+}

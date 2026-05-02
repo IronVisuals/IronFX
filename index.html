@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>IronFX</title>
+  <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+  <div id="app">
+
+    <div id="header">
+      <div id="logo">
+        <span id="logo-icon">&#9889;</span>
+        <span id="logo-text">IronFX</span>
+      </div>
+      <div id="header-right">
+        <span id="reindex-btn" title="Re-scan presets">&#8635;</span>
+        <span id="status-dot" class="dot-idle" title="Status"></span>
+        <span id="status-text">Indexing...</span>
+      </div>
+    </div>
+
+    <div id="search-wrapper">
+      <svg id="search-icon" viewBox="0 0 16 16" fill="none">
+        <circle cx="6.5" cy="6.5" r="4.5" stroke="currentColor" stroke-width="1.5"/>
+        <line x1="10" y1="10" x2="14" y2="14" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/>
+      </svg>
+      <input
+        type="text"
+        id="search-input"
+        placeholder="Search effects and presets..."
+        autocomplete="off"
+        autocorrect="off"
+        autocapitalize="off"
+        spellcheck="false"
+      />
+      <span id="clear-btn" class="hidden" title="Clear (Esc)">&#10005;</span>
+    </div>
+
+    <div id="results-container">
+      <div id="results-list" role="listbox" aria-label="Effects"></div>
+
+      <div id="empty-state" class="hidden">
+        <p>No results for &ldquo;<span id="empty-query"></span>&rdquo;</p>
+        <small>Try a shorter term or check spelling</small>
+      </div>
+
+      <div id="initial-state">
+        <p>Start typing to search</p>
+        <div id="hint-grid">
+          <span class="hint"><kbd>Enter</kbd> Apply effect</span>
+          <span class="hint"><kbd>&#8593;</kbd><kbd>&#8595;</kbd> Navigate</span>
+          <span class="hint"><kbd>Esc</kbd> Clear</span>
+        </div>
+        <div id="shortcut-notice">
+          <strong>Tip:</strong> Assign a keyboard shortcut in Premiere via<br>
+          <em>Edit &rarr; Keyboard Shortcuts &rarr; search &ldquo;IronFX&rdquo;</em>
+        </div>
+      </div>
+    </div>
+
+    <div id="footer">
+      <span id="results-count"></span>
+      <span id="clip-status">&#8212;</span>
+    </div>
+
+  </div>
+
+  <script src="js/CSInterface.js"></script>
+  <script src="js/effects-db.js"></script>
+  <script src="js/main.js"></script>
+</body>
+</html>
