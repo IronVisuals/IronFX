@@ -3,7 +3,7 @@
   ExtensionBundleId="com.ironfx.plugin"
   ExtensionBundleVersion="1.0.0"
   ExtensionBundleVersionString="1.0.0"
-  Version="10.0">
+  Version="11.0">
 
   <ExtensionList>
     <Extension Id="com.ironfx.panel" Version="1.0.0"/>
@@ -11,14 +11,14 @@
 
   <ExecutionEnvironment>
     <HostList>
-      <!-- Premiere Pro 2022 (v22) and above -->
-      <Host Name="PPRO" Version="[22.0,99.9]"/>
+      <!-- Premiere Pro 2026 and above -->
+      <Host Name="PPRO" Version="[25.0,99.9]"/>
     </HostList>
     <LocaleList>
       <Locale Code="All"/>
     </LocaleList>
     <RequiredRuntimeList>
-      <RequiredRuntime Name="CSXS" Version="10.0"/>
+      <RequiredRuntime Name="CSXS" Version="11.0"/>
     </RequiredRuntimeList>
   </ExecutionEnvironment>
 

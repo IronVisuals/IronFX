@@ -295,6 +295,8 @@ EffectsSearch.prototype.search = function (rawQuery) {
         type:       item.type,
         isPreset:   item.isPreset || false,
         presetPath: item.presetPath || '',
+        presetName: item.presetName || item.name || '',
+        sourceFile: item.sourceFile || '',
         score:      score,
         highlight:  this._highlight(item.name, q),
       });
@@ -348,14 +350,24 @@ EffectsSearch.prototype._fuzzyMatch = function (str, query) {
   return qi === query.length;
 };
 
+EffectsSearch.prototype._escapeHtml = function (value) {
+  return String(value == null ? '' : value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/\"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+};
+
 EffectsSearch.prototype._highlight = function (name, q) {
+  name = String(name == null ? '' : name);
   var lower = name.toLowerCase();
   var idx = lower.indexOf(q);
-  if (idx === -1) return name;
+  if (idx === -1) return this._escapeHtml(name);
   return (
-    name.slice(0, idx) +
-    '<mark>' + name.slice(idx, idx + q.length) + '</mark>' +
-    name.slice(idx + q.length)
+    this._escapeHtml(name.slice(0, idx)) +
+    '<mark>' + this._escapeHtml(name.slice(idx, idx + q.length)) + '</mark>' +
+    this._escapeHtml(name.slice(idx + q.length))
   );
 };
 

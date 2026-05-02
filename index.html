@@ -15,7 +15,8 @@
         <span id="logo-text">IronFX</span>
       </div>
       <div id="header-right">
-        <span id="reindex-btn" title="Re-scan presets">&#8635;</span>
+        <button id="settings-btn" class="icon-btn" title="IronFX settings">&#9881;</button>
+        <button id="reindex-btn" class="icon-btn" title="Re-scan effects and presets">&#8635;</button>
         <span id="status-dot" class="dot-idle" title="Status"></span>
         <span id="status-text">Indexing...</span>
       </div>
@@ -49,13 +50,13 @@
       <div id="initial-state">
         <p>Start typing to search</p>
         <div id="hint-grid">
-          <span class="hint"><kbd>Enter</kbd> Apply effect</span>
+          <span class="hint"><kbd>Enter</kbd> Apply</span>
           <span class="hint"><kbd>&#8593;</kbd><kbd>&#8595;</kbd> Navigate</span>
           <span class="hint"><kbd>Esc</kbd> Clear</span>
         </div>
         <div id="shortcut-notice">
-          <strong>Tip:</strong> Assign a keyboard shortcut in Premiere via<br>
-          <em>Edit &rarr; Keyboard Shortcuts &rarr; search &ldquo;IronFX&rdquo;</em>
+          <strong>IronFX shortcut:</strong> <span id="current-shortcut-label">Ctrl+Space</span><br>
+          Configure it in the gear menu.
         </div>
       </div>
     </div>
@@ -65,6 +66,47 @@
       <span id="clip-status">&#8212;</span>
     </div>
 
+  </div>
+
+  <div id="settings-modal" class="modal hidden" aria-hidden="true">
+    <div class="modal-backdrop" id="settings-backdrop"></div>
+    <section class="modal-card" role="dialog" aria-label="IronFX settings">
+      <header class="modal-header">
+        <div>
+          <h2>IronFX Settings</h2>
+          <p>Shortcut, preset folders and indexing.</p>
+        </div>
+        <button id="settings-close" class="icon-btn" title="Close">&#10005;</button>
+      </header>
+
+      <div class="setting-block">
+        <label class="setting-label">Popup shortcut</label>
+        <div class="shortcut-row">
+          <input id="shortcut-input" type="text" readonly value="Ctrl+Space">
+          <button id="capture-shortcut-btn">Record</button>
+          <button id="reset-shortcut-btn">Reset</button>
+        </div>
+        <p class="setting-help">
+          Works immediately while the IronFX panel has keyboard focus. For a true Premiere-wide/global hotkey, assign the panel command in Premiere Keyboard Shortcuts or use a native helper.
+        </p>
+      </div>
+
+      <div class="setting-block">
+        <label class="setting-label">Extra preset folders</label>
+        <div class="shortcut-row">
+          <button id="add-preset-folder-btn">Add folder</button>
+          <button id="clear-preset-folders-btn">Clear folders</button>
+        </div>
+        <div id="preset-folders-list" class="folder-list"></div>
+        <p class="setting-help">
+          IronFX also scans Premiere profile folders automatically, including Profile-* and Effect Presets and Custom Items .prfpset files.
+        </p>
+      </div>
+
+      <div class="setting-actions">
+        <button id="save-settings-btn" class="primary-btn">Save and reindex</button>
+      </div>
+    </section>
   </div>
 
   <script src="js/CSInterface.js"></script>

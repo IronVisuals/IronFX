@@ -392,3 +392,174 @@ kbd {
 .result-item.flash {
   animation: flash-apply 0.45s ease forwards;
 }
+
+/* Settings UI additions */
+.icon-btn {
+  border: 0;
+  background: transparent;
+  color: var(--text-lo);
+  font-size: 15px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: var(--radius);
+  transition: color 0.15s, background 0.15s, transform 0.3s;
+}
+
+.icon-btn:hover {
+  color: var(--text-med);
+  background: var(--bg2);
+}
+
+#reindex-btn.spinning {
+  animation: spin 0.7s linear infinite;
+}
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.52);
+}
+
+.modal-card {
+  position: absolute;
+  top: 18px;
+  right: 18px;
+  width: min(520px, calc(100vw - 36px));
+  max-height: calc(100vh - 36px);
+  overflow: auto;
+  background: var(--bg1);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: 0 18px 42px rgba(0, 0, 0, 0.38);
+  padding: 14px;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.modal-header h2 {
+  font-size: 16px;
+  color: var(--text-hi);
+  margin-bottom: 4px;
+}
+
+.modal-header p,
+.setting-help {
+  font-size: 11px;
+  color: var(--text-med);
+  line-height: 1.45;
+}
+
+.setting-block {
+  border-top: 1px solid var(--border);
+  padding: 12px 0;
+}
+
+.setting-label {
+  display: block;
+  font-size: 11px;
+  color: var(--text-hi);
+  font-weight: 700;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.shortcut-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.shortcut-row input {
+  flex: 1;
+  min-width: 0;
+  height: 30px;
+  background: var(--bg0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text-hi);
+  padding: 0 9px;
+  font-family: var(--font);
+}
+
+.shortcut-row button,
+.setting-actions button,
+.folder-row button {
+  height: 30px;
+  border: 1px solid var(--border);
+  background: var(--bg2);
+  color: var(--text-hi);
+  border-radius: var(--radius);
+  padding: 0 10px;
+  cursor: pointer;
+  font-family: var(--font);
+  font-size: 11px;
+}
+
+.shortcut-row button:hover,
+.setting-actions button:hover,
+.folder-row button:hover {
+  border-color: var(--accent);
+}
+
+.setting-actions {
+  display: flex;
+  justify-content: flex-end;
+  padding-top: 6px;
+}
+
+.setting-actions .primary-btn {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+
+.folder-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-height: 130px;
+  overflow: auto;
+  margin: 8px 0;
+}
+
+.folder-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: var(--bg0);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 6px;
+}
+
+.folder-row span {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--text-med);
+  font-size: 11px;
+}
+
+.folder-empty {
+  color: var(--text-lo);
+  font-size: 11px;
+  border: 1px dashed var(--border);
+  border-radius: var(--radius);
+  padding: 10px;
+}

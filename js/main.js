@@ -1,12 +1,11 @@
 /**
- * main.js — IronFX panel controller
+ * main.js - IronFX CEP panel controller
  *
- * Responsibilities:
- *   - Bootstrap: request preset list from JSX, seed the search index
- *   - UI: render results, handle keyboard nav (↑ ↓ Enter Esc)
- *   - Apply: send applyEffect() call to JSX, wrapped in undo group
- *   - Focus: auto-focus search input whenever the panel gains focus
- *   - Clip polling: show how many clips are selected in the footer
+ * Fixes in this build:
+ * - Stable apply path through QE DOM using effect display names.
+ * - Settings modal with configurable IronFX shortcut.
+ * - Extra preset folder picker + persisted settings.
+ * - Safer preset indexing call with custom folders passed to ExtendScript.
  */
 
 /* global CSInterface, EffectsSearch, BUILT_IN_EFFECTS */
@@ -14,97 +13,212 @@
 (function () {
   'use strict';
 
-  // ── State ────────────────────────────────────────────────────────────────
+  var SETTINGS_KEY = 'ironfx.settings.v2';
+  var DEFAULT_SETTINGS = {
+    shortcut: 'Ctrl+Space',
+    presetDirs: []
+  };
 
-  var cs      = new CSInterface();
-  var engine  = new EffectsSearch();
+  var cs = new CSInterface();
+  var engine = new EffectsSearch();
 
-  var results    = [];
-  var selIdx     = 0;
-  var ready      = false;
-  var clipPollId = null;
+  var results = [];
+  var selIdx = 0;
+  var ready = false;
+  var settings = loadSettings();
+  var captureMode = false;
 
-  // ── DOM refs ──────────────────────────────────────────────────────────────
-
-  var $input        = document.getElementById('search-input');
-  var $list         = document.getElementById('results-list');
-  var $clearBtn     = document.getElementById('clear-btn');
-  var $statusDot    = document.getElementById('status-dot');
-  var $statusText   = document.getElementById('status-text');
-  var $count        = document.getElementById('results-count');
-  var $clipStatus   = document.getElementById('clip-status');
+  var $input = document.getElementById('search-input');
+  var $list = document.getElementById('results-list');
+  var $clearBtn = document.getElementById('clear-btn');
+  var $statusDot = document.getElementById('status-dot');
+  var $statusText = document.getElementById('status-text');
+  var $count = document.getElementById('results-count');
+  var $clipStatus = document.getElementById('clip-status');
   var $initialState = document.getElementById('initial-state');
-  var $emptyState   = document.getElementById('empty-state');
-  var $emptyQuery   = document.getElementById('empty-query');
-  var $reindex      = document.getElementById('reindex-btn');
+  var $emptyState = document.getElementById('empty-state');
+  var $emptyQuery = document.getElementById('empty-query');
+  var $reindex = document.getElementById('reindex-btn');
+  var $settingsBtn = document.getElementById('settings-btn');
+  var $currentShortcutLabel = document.getElementById('current-shortcut-label');
 
-  // ── Bootstrap ─────────────────────────────────────────────────────────────
+  var $settingsModal = document.getElementById('settings-modal');
+  var $settingsBackdrop = document.getElementById('settings-backdrop');
+  var $settingsClose = document.getElementById('settings-close');
+  var $shortcutInput = document.getElementById('shortcut-input');
+  var $captureShortcutBtn = document.getElementById('capture-shortcut-btn');
+  var $resetShortcutBtn = document.getElementById('reset-shortcut-btn');
+  var $addPresetFolderBtn = document.getElementById('add-preset-folder-btn');
+  var $clearPresetFoldersBtn = document.getElementById('clear-preset-folders-btn');
+  var $presetFoldersList = document.getElementById('preset-folders-list');
+  var $saveSettingsBtn = document.getElementById('save-settings-btn');
 
   function init() {
-    setStatus('Indexing effects…', 'loading');
-    loadPresets();
+    applySettingsToUI();
     bindEvents();
+    loadPresets();
     startClipPoll();
-    $input.focus();
+    focusSearch(true);
   }
 
-  function loadPresets() {
-    $reindex.classList.add('spinning');
-
-    cs.evalScript('IronFX.getUserPresets()', function (raw) {
-      $reindex.classList.remove('spinning');
-
-      var presets = [];
-      try {
-        var parsed = JSON.parse(raw);
-        if (!parsed.error) presets = parsed.presets || [];
-      } catch (e) { /* swallow */ }
-
-      engine.init(BUILT_IN_EFFECTS, presets);
-      ready = true;
-
-      var total = BUILT_IN_EFFECTS.length + presets.length;
-      setStatus(total + ' effects · ' + presets.length + ' presets', 'ok');
-      setTimeout(function () { setStatus('Ready', 'idle'); }, 3000);
-    });
+  function loadSettings() {
+    try {
+      var raw = localStorage.getItem(SETTINGS_KEY);
+      if (!raw) return clone(DEFAULT_SETTINGS);
+      var parsed = JSON.parse(raw);
+      return normalizeSettings(parsed);
+    } catch (e) {
+      return clone(DEFAULT_SETTINGS);
+    }
   }
 
-  // ── Events ────────────────────────────────────────────────────────────────
+  function saveSettings() {
+    settings = normalizeSettings(settings);
+    localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings));
+    applySettingsToUI();
+  }
+
+  function normalizeSettings(value) {
+    var out = clone(DEFAULT_SETTINGS);
+    if (value && typeof value.shortcut === 'string' && value.shortcut) {
+      out.shortcut = value.shortcut;
+    }
+    if (value && value.presetDirs && value.presetDirs.length) {
+      out.presetDirs = uniqueStrings(value.presetDirs);
+    }
+    return out;
+  }
+
+  function clone(obj) {
+    return JSON.parse(JSON.stringify(obj));
+  }
+
+  function uniqueStrings(arr) {
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < arr.length; i++) {
+      var v = String(arr[i] || '').trim();
+      if (v && !seen[v]) {
+        seen[v] = true;
+        out.push(v);
+      }
+    }
+    return out;
+  }
 
   function bindEvents() {
-    $input.addEventListener('input',   onInput);
-    $input.addEventListener('keydown', onKeyDown);
+    $input.addEventListener('input', onInput);
+    $input.addEventListener('keydown', onInputKeyDown);
     $clearBtn.addEventListener('click', clear);
+
     $reindex.addEventListener('click', function () {
       if (!$reindex.classList.contains('spinning')) loadPresets();
     });
 
-    // Auto-focus search whenever this panel or the window gains focus.
-    // This is the key mechanism: Premiere's keyboard shortcut to "show panel"
-    // triggers a focus event on the CEP window.
-    window.addEventListener('focus', function () {
-      $input.focus();
-      $input.select();
+    $settingsBtn.addEventListener('click', openSettings);
+    $settingsBackdrop.addEventListener('click', closeSettings);
+    $settingsClose.addEventListener('click', closeSettings);
+    $captureShortcutBtn.addEventListener('click', startShortcutCapture);
+    $resetShortcutBtn.addEventListener('click', function () {
+      settings.shortcut = DEFAULT_SETTINGS.shortcut;
+      applySettingsToUI();
+    });
+    $addPresetFolderBtn.addEventListener('click', addPresetFolder);
+    $clearPresetFoldersBtn.addEventListener('click', function () {
+      settings.presetDirs = [];
+      renderPresetFolders();
+    });
+    $saveSettingsBtn.addEventListener('click', function () {
+      saveSettings();
+      closeSettings();
+      loadPresets();
     });
 
+    window.addEventListener('focus', function () { focusSearch(true); });
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden) {
-        $input.focus();
-        $input.select();
-      }
+      if (!document.hidden) focusSearch(true);
     });
 
-    // Any printable key typed while input is not focused re-routes to input
     document.addEventListener('keydown', function (e) {
-      if (document.activeElement !== $input &&
-          !e.ctrlKey && !e.metaKey && !e.altKey &&
-          e.key.length === 1) {
-        $input.focus();
+      if (captureMode) {
+        e.preventDefault();
+        e.stopPropagation();
+        var combo = eventToShortcut(e);
+        if (combo) {
+          settings.shortcut = combo;
+          captureMode = false;
+          $captureShortcutBtn.textContent = 'Record';
+          applySettingsToUI();
+        }
+        return;
       }
-    });
+
+      if (matchesShortcut(e, settings.shortcut)) {
+        e.preventDefault();
+        e.stopPropagation();
+        openIronFXPopup();
+        return;
+      }
+
+      if (document.activeElement !== $input &&
+          $settingsModal.classList.contains('hidden') &&
+          !e.ctrlKey && !e.metaKey && !e.altKey &&
+          e.key && e.key.length === 1) {
+        focusSearch(false);
+      }
+    }, true);
   }
 
-  // ── Search ─────────────────────────────────────────────────────────────────
+  function focusSearch(selectText) {
+    setTimeout(function () {
+      if ($input) {
+        $input.focus();
+        if (selectText) $input.select();
+      }
+    }, 20);
+  }
+
+  function openIronFXPopup() {
+    if (!$settingsModal.classList.contains('hidden')) closeSettings();
+    focusSearch(true);
+    setStatus('IronFX active', 'ok');
+    setTimeout(function () { setStatus('Ready', 'idle'); }, 1200);
+  }
+
+  function loadPresets() {
+    ready = false;
+    setStatus('Indexing effects and presets...', 'loading');
+    $reindex.classList.add('spinning');
+
+    var dirsJson = JSON.stringify(settings.presetDirs || []);
+    cs.evalScript('IronFX.getUserPresets(' + JSON.stringify(dirsJson) + ')', function (raw) {
+      $reindex.classList.remove('spinning');
+
+      var presets = [];
+      var warnings = [];
+      try {
+        var parsed = JSON.parse(raw || '{}');
+        presets = parsed.presets || [];
+        warnings = parsed.warnings || [];
+        if (parsed.error) warnings.push(parsed.error);
+      } catch (e) {
+        warnings.push('Could not parse preset scan response');
+      }
+
+      engine.init(BUILT_IN_EFFECTS, presets);
+      ready = true;
+      showInitial();
+
+      var total = BUILT_IN_EFFECTS.length + presets.length;
+      if (warnings.length) {
+        setStatus(total + ' items, ' + presets.length + ' presets (warnings)', 'error');
+        console.warn('[IronFX] preset scan warnings:', warnings.join(' | '));
+      } else {
+        setStatus(total + ' items, ' + presets.length + ' presets', 'ok');
+      }
+      setTimeout(function () { setStatus('Ready', 'idle'); }, 2500);
+    });
+  }
 
   function onInput() {
     var q = $input.value;
@@ -114,10 +228,11 @@
       showInitial();
       return;
     }
+
     if (!ready) return;
 
     results = engine.search(q);
-    selIdx  = 0;
+    selIdx = 0;
     render(results, q);
   }
 
@@ -125,8 +240,8 @@
     $initialState.classList.add('hidden');
     $emptyState.classList.add('hidden');
 
-    if (items.length === 0) {
-      $list.innerHTML  = '';
+    if (!items.length) {
+      $list.innerHTML = '';
       $emptyQuery.textContent = query;
       $emptyState.classList.remove('hidden');
       $count.textContent = '';
@@ -137,17 +252,19 @@
 
     var html = '';
     for (var i = 0; i < items.length; i++) {
-      var item   = items[i];
-      var icon   = item.type === 'audio' ? '♪' : item.isPreset ? '★' : '◆';
+      var item = items[i];
+      var icon = item.type === 'audio' ? '&#9834;' : item.isPreset ? '&#9733;' : '&#9670;';
       var badgeCls = item.isPreset ? 'badge-preset' : item.type === 'audio' ? 'badge-audio' : 'badge-effect';
-      var badgeTxt = item.isPreset ? 'PRESET'       : item.type === 'audio' ? 'AUDIO'       : 'FX';
-      var selCls   = (i === selIdx) ? ' is-selected' : '';
+      var badgeTxt = item.isPreset ? 'PRESET' : item.type === 'audio' ? 'AUDIO' : 'FX';
+      var selCls = i === selIdx ? ' is-selected' : '';
+      var category = escapeHtml(item.category || '');
+      var nameHtml = item.highlight || escapeHtml(item.name || '');
 
       html += '<div class="result-item' + selCls + '" data-idx="' + i + '" role="option">' +
                 '<span class="result-icon">' + icon + '</span>' +
                 '<div class="result-info">' +
-                  '<div class="result-name">' + (item.highlight || item.name) + '</div>' +
-                  '<div class="result-category">' + item.category + '</div>' +
+                  '<div class="result-name">' + nameHtml + '</div>' +
+                  '<div class="result-category">' + category + '</div>' +
                 '</div>' +
                 '<span class="result-badge ' + badgeCls + '">' + badgeTxt + '</span>' +
               '</div>';
@@ -155,7 +272,6 @@
 
     $list.innerHTML = html;
 
-    // Attach click handlers after innerHTML update
     var nodes = $list.querySelectorAll('.result-item');
     for (var j = 0; j < nodes.length; j++) {
       (function (node, idx) {
@@ -174,19 +290,17 @@
     $initialState.classList.remove('hidden');
     $count.textContent = '';
     results = [];
-    selIdx  = 0;
+    selIdx = 0;
   }
 
   function clear() {
     $input.value = '';
     $clearBtn.classList.add('hidden');
     showInitial();
-    $input.focus();
+    focusSearch(false);
   }
 
-  // ── Keyboard navigation ────────────────────────────────────────────────────
-
-  function onKeyDown(e) {
+  function onInputKeyDown(e) {
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
@@ -196,7 +310,6 @@
           scrollSelected();
         }
         break;
-
       case 'ArrowUp':
         e.preventDefault();
         if (results.length) {
@@ -205,16 +318,13 @@
           scrollSelected();
         }
         break;
-
       case 'Enter':
         e.preventDefault();
         if (results[selIdx]) applyEffect(results[selIdx]);
         break;
-
       case 'Escape':
         clear();
         break;
-
       default:
         break;
     }
@@ -232,55 +342,59 @@
     if (sel) sel.scrollIntoView({ block: 'nearest', behavior: 'smooth' });
   }
 
-  // ── Apply ──────────────────────────────────────────────────────────────────
-
   function applyEffect(item) {
-    // Flash the row
+    if (!item) return;
+
     var node = $list.querySelector('[data-idx="' + results.indexOf(item) + '"]');
     if (node) {
       node.classList.add('flash');
       setTimeout(function () { node.classList.remove('flash'); }, 450);
     }
 
-    setStatus('Applying…', 'loading');
+    setStatus('Applying ' + item.name + '...', 'loading');
 
     var payload = JSON.stringify({
-      matchName:  item.matchName,
-      name:       item.name,
-      type:       item.type,
-      isPreset:   item.isPreset,
-      presetPath: item.presetPath,
+      matchName: item.matchName || '',
+      name: item.name || '',
+      type: item.type || 'video',
+      isPreset: !!item.isPreset,
+      presetPath: item.presetPath || '',
+      presetName: item.presetName || item.name || ''
     });
 
     cs.evalScript('IronFX.applyEffect(' + JSON.stringify(payload) + ')', function (raw) {
+      var res;
       try {
-        var res = JSON.parse(raw);
-        if (res.error) {
-          setStatus('Error: ' + res.error, 'error');
-          setTimeout(function () { setStatus('Ready', 'idle'); }, 4000);
-        } else {
-          var n = res.clipsAffected;
-          setStatus('✔ Applied to ' + n + ' clip' + (n !== 1 ? 's' : ''), 'ok');
-          setTimeout(function () { setStatus('Ready', 'idle'); }, 2500);
-        }
+        res = JSON.parse(raw || '{}');
       } catch (e) {
-        setStatus('✔ Applied', 'ok');
-        setTimeout(function () { setStatus('Ready', 'idle'); }, 2000);
+        setStatus('Error: invalid host response', 'error');
+        setTimeout(function () { setStatus('Ready', 'idle'); }, 3500);
+        return;
       }
+
+      if (res.error) {
+        setStatus('Error: ' + res.error, 'error');
+        console.error('[IronFX] apply error:', res);
+        setTimeout(function () { setStatus('Ready', 'idle'); }, 5000);
+        return;
+      }
+
+      var n = res.clipsAffected || 0;
+      setStatus('Applied to ' + n + ' clip' + (n !== 1 ? 's' : ''), 'ok');
+      setTimeout(function () { setStatus('Ready', 'idle'); }, 2200);
+      updateClipStatus();
     });
   }
 
-  // ── Clip status polling ────────────────────────────────────────────────────
-
   function startClipPoll() {
     updateClipStatus();
-    clipPollId = setInterval(updateClipStatus, 1500);
+    setInterval(updateClipStatus, 1500);
   }
 
   function updateClipStatus() {
     cs.evalScript('IronFX.getSelectionInfo()', function (raw) {
       try {
-        var info = JSON.parse(raw);
+        var info = JSON.parse(raw || '{}');
         if (info.count > 0) {
           $clipStatus.textContent = info.count + ' clip' + (info.count !== 1 ? 's' : '') + ' selected';
           $clipStatus.className = 'has-clips';
@@ -289,20 +403,134 @@
           $clipStatus.className = 'no-clips';
         }
       } catch (e) {
-        $clipStatus.textContent = '—';
+        $clipStatus.textContent = '-';
         $clipStatus.className = '';
       }
     });
   }
 
-  // ── Status helpers ─────────────────────────────────────────────────────────
+  function openSettings() {
+    applySettingsToUI();
+    $settingsModal.classList.remove('hidden');
+    $settingsModal.setAttribute('aria-hidden', 'false');
+  }
+
+  function closeSettings() {
+    captureMode = false;
+    $captureShortcutBtn.textContent = 'Record';
+    $settingsModal.classList.add('hidden');
+    $settingsModal.setAttribute('aria-hidden', 'true');
+    focusSearch(false);
+  }
+
+  function applySettingsToUI() {
+    $shortcutInput.value = settings.shortcut || DEFAULT_SETTINGS.shortcut;
+    $currentShortcutLabel.textContent = settings.shortcut || DEFAULT_SETTINGS.shortcut;
+    renderPresetFolders();
+  }
+
+  function renderPresetFolders() {
+    var dirs = settings.presetDirs || [];
+    if (!dirs.length) {
+      $presetFoldersList.innerHTML = '<div class="folder-empty">No extra folders added.</div>';
+      return;
+    }
+    var html = '';
+    for (var i = 0; i < dirs.length; i++) {
+      html += '<div class="folder-row">' +
+                '<span title="' + escapeHtml(dirs[i]) + '">' + escapeHtml(dirs[i]) + '</span>' +
+                '<button data-folder-idx="' + i + '">Remove</button>' +
+              '</div>';
+    }
+    $presetFoldersList.innerHTML = html;
+
+    var buttons = $presetFoldersList.querySelectorAll('button[data-folder-idx]');
+    for (var j = 0; j < buttons.length; j++) {
+      buttons[j].addEventListener('click', function () {
+        var idx = parseInt(this.getAttribute('data-folder-idx'), 10);
+        settings.presetDirs.splice(idx, 1);
+        renderPresetFolders();
+      });
+    }
+  }
+
+  function addPresetFolder() {
+    var picked = pickFolder();
+    if (!picked) return;
+    settings.presetDirs = uniqueStrings((settings.presetDirs || []).concat([picked]));
+    renderPresetFolders();
+  }
+
+  function pickFolder() {
+    try {
+      if (window.cep && window.cep.fs) {
+        var result;
+        if (typeof window.cep.fs.showOpenDialogEx === 'function') {
+          result = window.cep.fs.showOpenDialogEx(false, true, 'Select preset folder', '', []);
+        } else if (typeof window.cep.fs.showOpenDialog === 'function') {
+          result = window.cep.fs.showOpenDialog(false, true, 'Select preset folder', '', []);
+        }
+        if (result && result.data && result.data.length) return result.data[0];
+      }
+    } catch (e) {
+      console.warn('[IronFX] folder picker failed:', e);
+    }
+    setStatus('Folder picker unavailable in this CEP host', 'error');
+    setTimeout(function () { setStatus('Ready', 'idle'); }, 3500);
+    return '';
+  }
+
+  function startShortcutCapture() {
+    captureMode = true;
+    $captureShortcutBtn.textContent = 'Press keys...';
+    $shortcutInput.value = 'Press shortcut...';
+  }
+
+  function eventToShortcut(e) {
+    var key = normalizeKeyName(e.key);
+    if (!key) return '';
+    if (key === 'Control' || key === 'Shift' || key === 'Alt' || key === 'Meta') return '';
+
+    var parts = [];
+    if (e.ctrlKey) parts.push('Ctrl');
+    if (e.altKey) parts.push('Alt');
+    if (e.shiftKey) parts.push('Shift');
+    if (e.metaKey) parts.push('Cmd');
+    parts.push(key);
+    return parts.join('+');
+  }
+
+  function normalizeKeyName(key) {
+    if (!key) return '';
+    if (key === ' ') return 'Space';
+    if (key === 'Esc') return 'Escape';
+    if (key.length === 1) return key.toUpperCase();
+    return key.charAt(0).toUpperCase() + key.slice(1);
+  }
+
+  function matchesShortcut(e, shortcut) {
+    if (!shortcut) return false;
+    return eventToShortcut(e) === shortcut;
+  }
 
   function setStatus(msg, state) {
     $statusText.textContent = msg;
-    $statusDot.className    = 'dot-' + state;
+    $statusDot.className = 'dot-' + (state || 'idle');
   }
 
-  // ── Boot ───────────────────────────────────────────────────────────────────
+  function escapeHtml(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  window.IronFXPanel = {
+    reloadIndex: loadPresets,
+    openSettings: openSettings
+  };
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', init);

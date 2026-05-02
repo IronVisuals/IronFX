@@ -1,21 +1,18 @@
 /**
- * IronFX.jsx — ExtendScript host bridge
- *
- * Runs inside Premiere Pro's ExtendScript engine (ES3 + Adobe DOM).
- * All public functions return JSON strings so the CEP layer can parse them.
+ * IronFX.jsx - Premiere Pro host bridge for CEP.
+ * ES3-compatible ExtendScript.
  *
  * Public API:
- *   IronFX.getUserPresets()         → { presets: [...], error: null }
- *   IronFX.applyEffect(payloadStr)  → { clipsAffected: N, error: null }
- *   IronFX.getSelectionInfo()       → { count: N }
+ *   IronFX.getUserPresets(extraDirsJson)
+ *   IronFX.applyEffect(payloadJson)
+ *   IronFX.getSelectionInfo()
  */
 
-// Ensure JSON is available (PP 2019+ includes it; polyfill for safety)
 if (typeof JSON === 'undefined') {
   JSON = {};
   JSON.stringify = function (v) {
     if (v === null || v === undefined) return 'null';
-    if (typeof v === 'string')  return '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r') + '"';
+    if (typeof v === 'string') return '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\n/g, '\\n').replace(/\r/g, '\\r') + '"';
     if (typeof v === 'number' || typeof v === 'boolean') return String(v);
     if (v instanceof Array) {
       var a = [];
@@ -34,106 +31,235 @@ if (typeof JSON === 'undefined') {
   JSON.parse = function (s) { return eval('(' + s + ')'); };
 }
 
-// ── Suppress ESTK debugger interrupts in production
 $.level = 0;
-
-// ============================================================================
 
 var IronFX = (function () {
 
-  // ── Preset scanning ─────────────────────────────────────────────────────────
+  function getUserPresets(extraDirsJson) {
+    var result = { presets: [], warnings: [], error: null };
+    var extraDirs = [];
 
-  function getUserPresets() {
-    var result = { presets: [], error: null };
     try {
-      var folder = _resolvePresetsFolder();
-      if (!folder) {
-        result.error = 'Presets folder not found';
-        return JSON.stringify(result);
+      if (extraDirsJson && typeof extraDirsJson === 'string') {
+        extraDirs = JSON.parse(extraDirsJson);
       }
-      _scanFolder(folder, '', result.presets);
+    } catch (parseErr) {
+      result.warnings.push('Could not parse extra preset folders: ' + parseErr.toString());
+      extraDirs = [];
+    }
+
+    try {
+      var roots = _getPresetRoots(extraDirs, result.warnings);
+      var seenFiles = {};
+      var seenPresets = {};
+
+      for (var i = 0; i < roots.length; i++) {
+        _scanPresetRoot(roots[i], result.presets, result.warnings, seenFiles, seenPresets);
+      }
+
+      if (result.presets.length === 0) {
+        result.warnings.push('No .prfpset/.prpreset files found in Premiere profile folders or extra folders.');
+      }
     } catch (e) {
       result.error = e.toString();
     }
+
     return JSON.stringify(result);
   }
 
-  function _resolvePresetsFolder() {
+  function _getPresetRoots(extraDirs, warnings) {
+    var roots = [];
     var isWin = ($.os.toLowerCase().indexOf('win') !== -1);
-    var basePath;
 
     if (isWin) {
-      var appData = $.getenv('APPDATA');
-      if (!appData) return null;
-      basePath = appData + '\\Adobe\\Premiere Pro';
+      _pushFolder(roots, new Folder($.getenv('APPDATA') + '\\Adobe\\Premiere Pro'));
+      _pushFolder(roots, new Folder($.getenv('USERPROFILE') + '\\Documents\\Adobe\\Premiere Pro'));
+      _pushFolder(roots, new Folder($.getenv('USERPROFILE') + '\\OneDrive\\Documents\\Adobe\\Premiere Pro'));
     } else {
-      var home = $.getenv('HOME');
-      if (!home) return null;
-      basePath = home + '/Library/Application Support/Adobe/Premiere Pro';
+      _pushFolder(roots, new Folder($.getenv('HOME') + '/Library/Application Support/Adobe/Premiere Pro'));
+      _pushFolder(roots, new Folder($.getenv('HOME') + '/Documents/Adobe/Premiere Pro'));
     }
 
-    var baseFolder = new Folder(basePath);
-    if (!baseFolder.exists) return null;
-
-    // Find the highest numeric version sub-folder (e.g. "22.0", "23.0", "24.0")
-    var children  = baseFolder.getFiles('*');
-    var bestVer   = 0;
-    var bestChild = null;
-
-    for (var i = 0; i < children.length; i++) {
-      if (children[i] instanceof Folder) {
-        var ver = parseFloat(children[i].name);
-        if (!isNaN(ver) && ver > bestVer) {
-          bestVer   = ver;
-          bestChild = children[i];
-        }
+    if (extraDirs && extraDirs.length) {
+      for (var i = 0; i < extraDirs.length; i++) {
+        _pushFolder(roots, new Folder(extraDirs[i]));
       }
     }
 
-    if (!bestChild) return null;
-
-    var sep = isWin ? '\\' : '/';
-    var candidates = [
-      new Folder(bestChild.fsName + sep + 'Effect Presets and Custom Items'),
-      new Folder(bestChild.fsName + sep + 'Presets'),
-    ];
-
-    for (var j = 0; j < candidates.length; j++) {
-      if (candidates[j].exists) return candidates[j];
+    var expanded = [];
+    for (var r = 0; r < roots.length; r++) {
+      var root = roots[r];
+      _pushFolder(expanded, root);
+      try {
+        var children = root.getFiles('*');
+        for (var c = 0; c < children.length; c++) {
+          if (children[c] instanceof Folder) {
+            if (/^\d+(\.\d+)?$/.test(children[c].name) || /^Profile/i.test(children[c].name)) {
+              _pushFolder(expanded, children[c]);
+            }
+          }
+        }
+      } catch (e) {
+        warnings.push('Could not expand preset root ' + root.fsName + ': ' + e.toString());
+      }
     }
 
-    return null;
+    return _uniqueFolders(expanded);
   }
 
-  function _scanFolder(folder, categoryPath, out) {
-    var items = folder.getFiles('*');
+  function _pushFolder(arr, folder) {
+    try {
+      if (folder && folder.exists) arr.push(folder);
+    } catch (e) {}
+  }
+
+  function _uniqueFolders(folders) {
+    var seen = {};
+    var out = [];
+    for (var i = 0; i < folders.length; i++) {
+      var key = folders[i].fsName;
+      if (!seen[key]) {
+        seen[key] = true;
+        out.push(folders[i]);
+      }
+    }
+    return out;
+  }
+
+  function _scanPresetRoot(root, out, warnings, seenFiles, seenPresets) {
+    _scanFolder(root, root.name, out, warnings, seenFiles, seenPresets, 0);
+  }
+
+  function _scanFolder(folder, categoryPath, out, warnings, seenFiles, seenPresets, depth) {
+    if (!folder || !folder.exists || depth > 8) return;
+
+    var items;
+    try {
+      items = folder.getFiles('*');
+    } catch (e) {
+      warnings.push('Could not read folder ' + folder.fsName + ': ' + e.toString());
+      return;
+    }
+
     for (var i = 0; i < items.length; i++) {
       var item = items[i];
       if (item instanceof Folder) {
         var sub = categoryPath ? (categoryPath + ' / ' + item.name) : item.name;
-        _scanFolder(item, sub, out);
+        _scanFolder(item, sub, out, warnings, seenFiles, seenPresets, depth + 1);
       } else if (item instanceof File) {
-        var ext = item.name.split('.').pop().toLowerCase();
+        var ext = _extension(item.name);
         if (ext === 'prfpset' || ext === 'prpreset') {
-          var label = item.name.replace(/\.(prfpset|prpreset)$/i, '');
-          out.push({
-            name:       label,
-            matchName:  '',
-            category:   categoryPath || 'User Presets',
-            type:       'video',
-            isPreset:   true,
-            presetPath: item.fsName,
-          });
+          _indexPresetFile(item, categoryPath || 'User Presets', out, warnings, seenFiles, seenPresets);
         }
       }
     }
   }
 
-  // ── Apply effect ────────────────────────────────────────────────────────────
+  function _indexPresetFile(file, categoryPath, out, warnings, seenFiles, seenPresets) {
+    var fileKey = file.fsName;
+    if (seenFiles[fileKey]) return;
+    seenFiles[fileKey] = true;
+
+    var names = _extractPresetNames(file, warnings);
+    if (names.length === 0) {
+      names = [_basename(file.name)];
+    }
+
+    for (var i = 0; i < names.length; i++) {
+      var name = names[i];
+      var presetKey = file.fsName + '::' + name;
+      if (seenPresets[presetKey]) continue;
+      seenPresets[presetKey] = true;
+
+      out.push({
+        name: name,
+        matchName: '',
+        category: categoryPath || 'User Presets',
+        type: 'video',
+        isPreset: true,
+        presetPath: file.fsName,
+        presetName: name,
+        sourceFile: file.name
+      });
+    }
+  }
+
+  function _extractPresetNames(file, warnings) {
+    var text = _readFileText(file, warnings);
+    var names = [];
+    var seen = {};
+
+    if (!text) return names;
+
+    _collectRegexNames(text, /<Preset[^>]*(?:name|Name|displayName|DisplayName)=["']([^"']+)["']/g, names, seen);
+    _collectRegexNames(text, /<(?:Name|name|DisplayName|displayName)>([^<]+)<\/(?:Name|name|DisplayName|displayName)>/g, names, seen);
+    _collectRegexNames(text, /(?:PresetName|presetName|displayName|DisplayName|Name|name)=["']([^"']+)["']/g, names, seen);
+
+    return names;
+  }
+
+  function _collectRegexNames(text, regex, out, seen) {
+    var m;
+    while ((m = regex.exec(text)) !== null) {
+      var name = _cleanPresetName(m[1]);
+      if (_looksLikePresetName(name) && !seen[name]) {
+        seen[name] = true;
+        out.push(name);
+      }
+      if (out.length > 5000) break;
+    }
+  }
+
+  function _readFileText(file, warnings) {
+    try {
+      file.encoding = 'UTF-8';
+      if (!file.open('r')) return '';
+      var text = file.read();
+      file.close();
+      return text;
+    } catch (e) {
+      try { file.close(); } catch (ignore) {}
+      warnings.push('Could not parse preset file ' + file.fsName + ': ' + e.toString());
+      return '';
+    }
+  }
+
+  function _cleanPresetName(value) {
+    var s = String(value || '');
+    s = s.replace(/&amp;/g, '&').replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+    s = s.replace(/[\r\n\t]+/g, ' ');
+    s = _trim(s);
+    return s;
+  }
+
+  function _looksLikePresetName(name) {
+    if (!name) return false;
+    if (name.length < 2 || name.length > 140) return false;
+    if (/^(true|false|null|none|undefined)$/i.test(name)) return false;
+    if (/^\d+(\.\d+)?$/.test(name)) return false;
+    if (/^(ADBE|AE\.|PR\.|BE\.|VideoFilter|AudioFilter)/i.test(name)) return false;
+    if (/\.(dll|bundle|plugin|prfpset|prpreset)$/i.test(name)) return false;
+    return true;
+  }
+
+  function _basename(name) {
+    return String(name || '').replace(/\.(prfpset|prpreset)$/i, '');
+  }
+
+  function _extension(name) {
+    var parts = String(name || '').split('.');
+    if (parts.length < 2) return '';
+    return parts[parts.length - 1].toLowerCase();
+  }
+
+  function _trim(s) {
+    return String(s || '').replace(/^\s+|\s+$/g, '');
+  }
 
   function applyEffect(payloadStr) {
-    var result = { clipsAffected: 0, error: null };
+    var result = { clipsAffected: 0, skipped: 0, warnings: [], error: null };
     var payload;
+    var undoStarted = false;
 
     try {
       payload = JSON.parse(payloadStr);
@@ -149,161 +275,328 @@ var IronFX = (function () {
         return JSON.stringify(result);
       }
 
-      var clips = _getSelectedClips(seq);
-      if (clips.length === 0) {
+      var refs = _getSelectedClipRefs(seq);
+      if (refs.length === 0) {
         result.error = 'No clips selected in the timeline';
         return JSON.stringify(result);
       }
 
-      app.beginUndoGroup('IronFX: ' + payload.name);
+      undoStarted = _beginUndo('IronFX: ' + (payload.name || payload.presetName || 'Apply'));
+      if (!undoStarted) result.warnings.push('Premiere CEP host did not expose app.beginUndoGroup(); action was applied without a named undo group.');
 
-      try {
-        for (var i = 0; i < clips.length; i++) {
-          var ok;
-          if (payload.isPreset && payload.presetPath) {
-            ok = _applyPreset(clips[i], payload.presetPath);
-          } else {
-            ok = _applyEffect(clips[i], payload.matchName);
-          }
-          if (ok) result.clipsAffected++;
+      for (var i = 0; i < refs.length; i++) {
+        var ok = false;
+        if (payload.isPreset && payload.presetPath) {
+          ok = _applyPresetToRef(refs[i], payload, result.warnings);
+        } else {
+          ok = _applyNativeEffectToRef(refs[i], payload, result.warnings);
         }
-      } finally {
-        app.endUndoGroup();
+        if (ok) result.clipsAffected++;
+        else result.skipped++;
       }
+
+      if (undoStarted) _endUndo();
+      undoStarted = false;
 
       if (result.clipsAffected === 0) {
-        result.error = 'Effect could not be applied. Verify it is installed.';
+        result.error = 'Nothing was applied. Check clip type, effect name, preset file, or installation.';
       }
-
-    } catch (e) {
-      result.error = e.toString();
-      try { app.endUndoGroup(); } catch (ignore) {}
+    } catch (err) {
+      result.error = err.toString();
+      if (undoStarted) {
+        try { _endUndo(); } catch (ignore2) {}
+      }
     }
 
     return JSON.stringify(result);
   }
 
-  // Primary path: official Premiere Pro ExtendScript API
-  function _applyEffect(clip, matchName) {
+  function _beginUndo(name) {
     try {
-      var comp = clip.components;
-      if (!comp) return false;
-      var added = comp.addComponent(matchName);
-      return (added !== null && added !== undefined);
-    } catch (e) {
-      // Fallback: QE DOM (undocumented but widely used)
-      return _applyEffectQE(clip, matchName);
-    }
+      if (app && typeof app.beginUndoGroup === 'function') {
+        app.beginUndoGroup(name);
+        return true;
+      }
+    } catch (e) {}
+    return false;
   }
 
-  // QE DOM fallback for effects that addComponent() cannot reach
-  function _applyEffectQE(clip, matchName) {
+  function _endUndo() {
+    try {
+      if (app && typeof app.endUndoGroup === 'function') app.endUndoGroup();
+    } catch (e) {}
+  }
+
+  function _applyNativeEffectToRef(ref, payload, warnings) {
+    var wantedType = payload.type || 'video';
+    if (wantedType === 'audio' && ref.kind !== 'audio') return false;
+    if (wantedType !== 'audio' && ref.kind !== 'video') return false;
+
     try {
       app.enableQE();
       var qeSeq = qe.project.getActiveSequence();
       if (!qeSeq) return false;
 
-      var qeClip = _matchQEClip(qeSeq, clip);
+      var qeClip = _getQEClipForRef(qeSeq, ref);
       if (!qeClip) return false;
 
-      // QE clip exposes addVideoEffect / addAudioEffect
+      if (wantedType === 'audio') {
+        return _addAudioEffectQE(qeClip, payload);
+      }
+      return _addVideoEffectQE(qeClip, payload);
+    } catch (e) {
+      warnings.push('QE apply failed for ' + (payload.name || payload.matchName) + ': ' + e.toString());
+    }
+
+    return _applyComponentFallback(ref.clip, payload, warnings);
+  }
+
+  function _addVideoEffectQE(qeClip, payload) {
+    var effect = _findVideoEffect(payload);
+    if (!effect) return false;
+
+    try {
       if (typeof qeClip.addVideoEffect === 'function') {
-        qeClip.addVideoEffect(matchName);
+        qeClip.addVideoEffect(effect);
         return true;
       }
-    } catch (e) {}
+    } catch (e1) {
+      try {
+        qeClip.addVideoEffect(payload.name);
+        return true;
+      } catch (e2) {}
+    }
     return false;
   }
 
-  // Preset application: try QE applyPreset(), fall back to file-based import
-  function _applyPreset(clip, presetPath) {
-    // Method 1: QE DOM applyPreset (Premiere Pro 2020+)
-    try {
-      app.enableQE();
-      var qeSeq = qe.project.getActiveSequence();
-      if (qeSeq) {
-        var qeClip = _matchQEClip(qeSeq, clip);
-        if (qeClip && typeof qeClip.applyPreset === 'function') {
-          qeClip.applyPreset(presetPath);
-          return true;
-        }
-      }
-    } catch (e) {}
+  function _addAudioEffectQE(qeClip, payload) {
+    var effect = _findAudioEffect(payload);
+    if (!effect) return false;
 
-    // Method 2: components.importPreset (available in some API versions)
     try {
-      var f = new File(presetPath);
-      if (!f.exists) return false;
-      var comp = clip.components;
-      if (comp && typeof comp.importPreset === 'function') {
-        comp.importPreset(f);
+      if (typeof qeClip.addAudioEffect === 'function') {
+        qeClip.addAudioEffect(effect);
         return true;
       }
-    } catch (e) {}
-
+    } catch (e1) {
+      try {
+        qeClip.addAudioEffect(payload.name);
+        return true;
+      } catch (e2) {}
+    }
     return false;
   }
 
-  // Match a standard TrackItem to a QE clip by timeline start position
-  function _matchQEClip(qeSeq, clip) {
-    try {
-      var targetSec = clip.start.seconds;
-      var trackLists = [qeSeq.videoTrackList, qeSeq.audioTrackList];
-
-      for (var t = 0; t < trackLists.length; t++) {
-        var tl = trackLists[t];
-        if (!tl) continue;
-        for (var i = 0; i < tl.numTracks; i++) {
-          var track = tl[i];
-          for (var j = 0; j < track.numItems; j++) {
-            var qeClip = track[j];
-            if (Math.abs(qeClip.start.secs - targetSec) < 0.001) {
-              return qeClip;
-            }
-          }
+  function _findVideoEffect(payload) {
+    var names = _effectCandidateNames(payload);
+    for (var i = 0; i < names.length; i++) {
+      try {
+        if (qe.project && typeof qe.project.getVideoEffectByName === 'function') {
+          var effect = qe.project.getVideoEffectByName(names[i]);
+          if (effect) return effect;
         }
-      }
-    } catch (e) {}
+      } catch (e) {}
+    }
     return null;
   }
 
-  // ── Selection helpers ────────────────────────────────────────────────────────
+  function _findAudioEffect(payload) {
+    var names = _effectCandidateNames(payload);
+    for (var i = 0; i < names.length; i++) {
+      try {
+        if (qe.project && typeof qe.project.getAudioEffectByName === 'function') {
+          var effect = qe.project.getAudioEffectByName(names[i]);
+          if (effect) return effect;
+        }
+      } catch (e) {}
+    }
+    return null;
+  }
 
-  function _getSelectedClips(seq) {
-    var clips = [];
+  function _effectCandidateNames(payload) {
+    var out = [];
+    _pushUniqueString(out, payload.name);
+    _pushUniqueString(out, payload.matchName);
 
-    // Modern API: Sequence.getSelection() (PP 14.0 / 2020+)
+    if (payload.matchName) {
+      var simplified = String(payload.matchName).replace(/^AEVideoFilter\s+/i, '').replace(/^AE\.\s*/i, '').replace(/^PR\.\s*/i, '').replace(/^ADBE\s+/i, '');
+      _pushUniqueString(out, simplified);
+    }
+    return out;
+  }
+
+  function _pushUniqueString(arr, value) {
+    var s = _trim(value);
+    if (!s) return;
+    for (var i = 0; i < arr.length; i++) {
+      if (arr[i] === s) return;
+    }
+    arr.push(s);
+  }
+
+  function _applyComponentFallback(clip, payload, warnings) {
     try {
-      var sel = seq.getSelection();
-      if (sel && sel.length > 0) return sel;
-    } catch (e) {}
+      if (clip && clip.components && typeof clip.components.addComponent === 'function') {
+        var added = clip.components.addComponent(payload.matchName || payload.name);
+        return added !== null && added !== undefined;
+      }
+    } catch (e) {
+      warnings.push('Component fallback failed: ' + e.toString());
+    }
+    return false;
+  }
 
-    // Legacy fallback: iterate all tracks and test clip.isSelected()
+  function _applyPresetToRef(ref, payload, warnings) {
+    var f = new File(payload.presetPath);
+    if (!f.exists) {
+      warnings.push('Preset file not found: ' + payload.presetPath);
+      return false;
+    }
+
+    try {
+      app.enableQE();
+      var qeSeq = qe.project.getActiveSequence();
+      var qeClip = qeSeq ? _getQEClipForRef(qeSeq, ref) : null;
+      if (qeClip) {
+        if (_tryQEApplyPreset(qeClip, f, payload)) return true;
+      }
+    } catch (e) {
+      warnings.push('QE preset apply failed for ' + payload.presetName + ': ' + e.toString());
+    }
+
+    try {
+      if (ref.clip && ref.clip.components && typeof ref.clip.components.importPreset === 'function') {
+        ref.clip.components.importPreset(f);
+        return true;
+      }
+    } catch (e2) {
+      warnings.push('Component preset fallback failed: ' + e2.toString());
+    }
+
+    return false;
+  }
+
+  function _tryQEApplyPreset(qeClip, file, payload) {
+    var path = file.fsName;
+    var name = payload.presetName || payload.name || '';
+    var attempts = [
+      function () { return qeClip.applyPreset(path, name); },
+      function () { return qeClip.applyPreset(path); },
+      function () { return qeClip.applyPreset(file); },
+      function () { return qeClip.addPreset(path, name); },
+      function () { return qeClip.addPreset(path); },
+      function () { return qeClip.addPreset(file); }
+    ];
+
+    for (var i = 0; i < attempts.length; i++) {
+      try {
+        var ret = attempts[i]();
+        if (ret !== false) return true;
+      } catch (e) {}
+    }
+    return false;
+  }
+
+  function _getSelectedClipRefs(seq) {
+    var refs = [];
+
     try {
       var vt = seq.videoTracks;
       for (var vi = 0; vi < vt.numTracks; vi++) {
         var vTrack = vt[vi];
         for (var vc = 0; vc < vTrack.clips.numItems; vc++) {
-          try {
-            var vClip = vTrack.clips[vc];
-            if (vClip.isSelected()) clips.push(vClip);
-          } catch (e) {}
+          var vClip = vTrack.clips[vc];
+          if (_isClipSelected(vClip)) {
+            refs.push({ clip: vClip, kind: 'video', trackIndex: vi, clipIndex: vc });
+          }
         }
       }
+    } catch (e1) {}
 
+    try {
       var at = seq.audioTracks;
       for (var ai = 0; ai < at.numTracks; ai++) {
         var aTrack = at[ai];
         for (var ac = 0; ac < aTrack.clips.numItems; ac++) {
-          try {
-            var aClip = aTrack.clips[ac];
-            if (aClip.isSelected()) clips.push(aClip);
-          } catch (e) {}
+          var aClip = aTrack.clips[ac];
+          if (_isClipSelected(aClip)) {
+            refs.push({ clip: aClip, kind: 'audio', trackIndex: ai, clipIndex: ac });
+          }
         }
       }
-    } catch (e) {}
+    } catch (e2) {}
 
-    return clips;
+    return refs;
+  }
+
+  function _isClipSelected(clip) {
+    try {
+      if (clip && typeof clip.isSelected === 'function') return clip.isSelected();
+      if (clip && typeof clip.isSelected !== 'undefined') return !!clip.isSelected;
+    } catch (e) {}
+    return false;
+  }
+
+  function _getQEClipForRef(qeSeq, ref) {
+    var track = _getQETrack(qeSeq, ref.kind, ref.trackIndex);
+    if (!track) return null;
+
+    var clip = _getQEItem(track, ref.clipIndex);
+    if (clip) return clip;
+
+    return _findQEClipByStart(qeSeq, ref);
+  }
+
+  function _getQETrack(qeSeq, kind, index) {
+    try {
+      if (kind === 'video' && typeof qeSeq.getVideoTrackAt === 'function') return qeSeq.getVideoTrackAt(index);
+      if (kind === 'audio' && typeof qeSeq.getAudioTrackAt === 'function') return qeSeq.getAudioTrackAt(index);
+    } catch (e1) {}
+
+    try {
+      var list = kind === 'video' ? qeSeq.videoTrackList : qeSeq.audioTrackList;
+      if (!list) return null;
+      if (typeof list.getTrackAt === 'function') return list.getTrackAt(index);
+      return list[index];
+    } catch (e2) {}
+    return null;
+  }
+
+  function _getQEItem(track, index) {
+    try {
+      if (typeof track.getItemAt === 'function') return track.getItemAt(index);
+      if (track[index]) return track[index];
+    } catch (e) {}
+    return null;
+  }
+
+  function _findQEClipByStart(qeSeq, ref) {
+    try {
+      var target = _clipStartSeconds(ref.clip);
+      var track = _getQETrack(qeSeq, ref.kind, ref.trackIndex);
+      if (!track) return null;
+      var count = track.numItems || track.numClips || 0;
+      for (var i = 0; i < count; i++) {
+        var item = _getQEItem(track, i);
+        if (item && Math.abs(_qeStartSeconds(item) - target) < 0.002) return item;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function _clipStartSeconds(clip) {
+    try {
+      if (clip.start && typeof clip.start.seconds !== 'undefined') return Number(clip.start.seconds);
+    } catch (e) {}
+    return 0;
+  }
+
+  function _qeStartSeconds(qeClip) {
+    try {
+      if (qeClip.start && typeof qeClip.start.secs !== 'undefined') return Number(qeClip.start.secs);
+      if (qeClip.start && typeof qeClip.start.seconds !== 'undefined') return Number(qeClip.start.seconds);
+    } catch (e) {}
+    return 0;
   }
 
   function getSelectionInfo() {
@@ -311,17 +604,15 @@ var IronFX = (function () {
     try {
       var seq = app.project.activeSequence;
       if (!seq) return JSON.stringify(result);
-      result.count = _getSelectedClips(seq).length;
+      result.count = _getSelectedClipRefs(seq).length;
     } catch (e) {}
     return JSON.stringify(result);
   }
 
-  // ── Public API ───────────────────────────────────────────────────────────────
-
   return {
-    getUserPresets:   getUserPresets,
-    applyEffect:      applyEffect,
-    getSelectionInfo: getSelectionInfo,
+    getUserPresets: getUserPresets,
+    applyEffect: applyEffect,
+    getSelectionInfo: getSelectionInfo
   };
 
 })();
