@@ -160,14 +160,16 @@ var IronFX = (function () {
     if (seenFiles[fileKey]) return;
     seenFiles[fileKey] = true;
 
-    var names = _extractPresetNames(file, warnings);
-    if (names.length === 0) {
-      names = [_basename(file.name)];
+    var entries = _extractPresetEntries(file, warnings);
+    if (entries.length === 0) {
+      entries = [{ name: _basename(file.name), type: 'video' }];
     }
 
-    for (var i = 0; i < names.length; i++) {
-      var name = names[i];
-      var presetKey = file.fsName + '::' + name;
+    for (var i = 0; i < entries.length; i++) {
+      var entry = entries[i];
+      var name = entry.name;
+      var presetType = entry.type || 'video';
+      var presetKey = file.fsName + '::' + name + '::' + presetType;
       if (seenPresets[presetKey]) continue;
       seenPresets[presetKey] = true;
 
@@ -175,7 +177,7 @@ var IronFX = (function () {
         name: name,
         matchName: '',
         category: categoryPath || 'User Presets',
-        type: 'video',
+        type: presetType,
         isPreset: true,
         presetPath: file.fsName,
         presetName: name,
@@ -184,27 +186,47 @@ var IronFX = (function () {
     }
   }
 
-  function _extractPresetNames(file, warnings) {
+  function _extractPresetEntries(file, warnings) {
     var text = _readFileText(file, warnings);
-    var names = [];
+    var entries = [];
     var seen = {};
 
-    if (!text) return names;
+    if (!text) return entries;
 
-    _collectRegexNames(text, /<Preset[^>]*(?:name|Name|displayName|DisplayName)=["']([^"']+)["']/g, names, seen);
-    _collectRegexNames(text, /<(?:Name|name|DisplayName|displayName)>([^<]+)<\/(?:Name|name|DisplayName|displayName)>/g, names, seen);
-    _collectRegexNames(text, /(?:PresetName|presetName|displayName|DisplayName|Name|name)=["']([^"']+)["']/g, names, seen);
+    _collectRegexPresetEntries(text, /<Preset[^>]*(?:name|Name|displayName|DisplayName)=["']([^"']+)["']/g, entries, seen, 'video');
+    _collectRegexPresetEntries(text, /<(?:Name|name|DisplayName|displayName)>([^<]+)<\/(?:Name|name|DisplayName|displayName)>/g, entries, seen, 'video');
+    _collectRegexPresetEntries(text, /(?:PresetName|presetName|displayName|DisplayName|Name|name)=["']([^"']+)["']/g, entries, seen, 'video');
+    _collectPremiereTextPresetEntries(text, entries, seen);
 
-    return names;
+    return entries;
   }
 
-  function _collectRegexNames(text, regex, out, seen) {
+  function _collectRegexPresetEntries(text, regex, out, seen, type) {
     var m;
     while ((m = regex.exec(text)) !== null) {
       var name = _cleanPresetName(m[1]);
       if (_looksLikePresetName(name) && !seen[name]) {
         seen[name] = true;
-        out.push(name);
+        out.push({ name: name, type: type || 'video' });
+      }
+      if (out.length > 5000) break;
+    }
+  }
+
+  function _collectPremiereTextPresetEntries(text, out, seen) {
+    var mediaGuid = '(228cda18-3625-4d2d-951e-348879e4ed93|80b8e3d5-6dca-4195-aefb-cb5f407ab009)';
+    var re = new RegExp('(?:^|\\s)(?:true|false)\\s+false\\s+\\d+\\s+false\\s+(.{2,140}?)\\s+false\\s+\\d+\\s+\\d+\\s+\\d+(?:\\.\\d*)?\\s+\\d{10,}\\s+\\d+\\s+' + mediaGuid, 'ig');
+    var m;
+
+    while ((m = re.exec(text)) !== null) {
+      var name = _cleanPresetName(m[1]);
+      var guid = String(m[2] || '').toLowerCase();
+      var type = guid === '80b8e3d5-6dca-4195-aefb-cb5f407ab009' ? 'audio' : 'video';
+      var key = name + '::' + type;
+
+      if (_looksLikePresetName(name) && !seen[key]) {
+        seen[key] = true;
+        out.push({ name: name, type: type });
       }
       if (out.length > 5000) break;
     }
@@ -447,6 +469,10 @@ var IronFX = (function () {
   }
 
   function _applyPresetToRef(ref, payload, warnings) {
+    var wantedType = payload.type || 'video';
+    if (wantedType === 'audio' && ref.kind !== 'audio') return false;
+    if (wantedType !== 'audio' && ref.kind !== 'video') return false;
+
     var f = new File(payload.presetPath);
     if (!f.exists) {
       warnings.push('Preset file not found: ' + payload.presetPath);
@@ -458,43 +484,141 @@ var IronFX = (function () {
       var qeSeq = qe.project.getActiveSequence();
       var qeClip = qeSeq ? _getQEClipForRef(qeSeq, ref) : null;
       if (qeClip) {
-        if (_tryQEApplyPreset(qeClip, f, payload)) return true;
+        var beforeCount = _componentCount(ref.clip);
+
+        if (_tryQEApplyPresetFile(qeClip, f, payload, warnings)) {
+          if (_componentCountIncreased(ref.clip, beforeCount)) return true;
+          warnings.push('QE preset file call returned, but no component was added; trying installed preset lookup.');
+        }
+
+        if (_tryPresetAsNamedEffect(qeClip, payload, ref.kind, warnings)) {
+          return true;
+        }
       }
     } catch (e) {
       warnings.push('QE preset apply failed for ' + payload.presetName + ': ' + e.toString());
     }
 
-    try {
-      if (ref.clip && ref.clip.components && typeof ref.clip.components.importPreset === 'function') {
-        ref.clip.components.importPreset(f);
-        return true;
+    if (_tryComponentPresetFallback(ref.clip, f, payload, warnings)) return true;
+
+    return false;
+  }
+
+  function _tryQEApplyPresetFile(qeClip, file, payload, warnings) {
+    var path = file.fsName;
+    var name = payload.presetName || payload.name || '';
+    var attempts = [
+      { method: 'applyPreset', args: [path, name] },
+      { method: 'applyPreset', args: [path] },
+      { method: 'applyPreset', args: [file] },
+      { method: 'addPreset', args: [path, name] },
+      { method: 'addPreset', args: [path] },
+      { method: 'addPreset', args: [file] }
+    ];
+    var exposedMethod = false;
+    var lastError = '';
+
+    for (var i = 0; i < attempts.length; i++) {
+      var attempt = attempts[i];
+      if (typeof qeClip[attempt.method] !== 'function') continue;
+      exposedMethod = true;
+
+      try {
+        var ret = qeClip[attempt.method].apply(qeClip, attempt.args);
+        if (ret !== false) return true;
+      } catch (e) {
+        lastError = e.toString();
       }
-    } catch (e2) {
-      warnings.push('Component preset fallback failed: ' + e2.toString());
+    }
+
+    if (!exposedMethod) {
+      warnings.push('This Premiere QE clip does not expose applyPreset/addPreset for preset files.');
+    } else if (lastError) {
+      warnings.push('QE preset file call failed: ' + lastError);
+    }
+    return false;
+  }
+
+  function _tryPresetAsNamedEffect(qeClip, payload, kind, warnings) {
+    var names = [];
+    _pushUniqueString(names, payload.presetName);
+    _pushUniqueString(names, payload.name);
+    _pushUniqueString(names, _basename(payload.sourceFile || ''));
+    _pushUniqueString(names, _basename(payload.presetPath || ''));
+
+    for (var i = 0; i < names.length; i++) {
+      var lookupPayload = { name: names[i], matchName: names[i] };
+      var effect = kind === 'audio' ? _findAudioEffect(lookupPayload) : _findVideoEffect(lookupPayload);
+      if (!effect) continue;
+
+      try {
+        if (kind === 'audio' && typeof qeClip.addAudioEffect === 'function') {
+          qeClip.addAudioEffect(effect);
+          return true;
+        }
+        if (kind !== 'audio' && typeof qeClip.addVideoEffect === 'function') {
+          qeClip.addVideoEffect(effect);
+          return true;
+        }
+      } catch (e) {
+        warnings.push('Installed preset lookup failed for ' + names[i] + ': ' + e.toString());
+      }
+    }
+
+    warnings.push('Preset was not found by name in Premiere Effects/Preset registry.');
+    return false;
+  }
+
+  function _tryComponentPresetFallback(clip, file, payload, warnings) {
+    if (!clip || !clip.components) return false;
+
+    var methods = ['importPreset', 'applyPreset', 'applyEffectPreset'];
+    var args = [
+      [file.fsName],
+      [file],
+      [file.fsName, payload.presetName || payload.name || '']
+    ];
+    var exposedMethod = false;
+    var lastError = '';
+
+    for (var m = 0; m < methods.length; m++) {
+      var method = methods[m];
+      if (typeof clip.components[method] !== 'function') continue;
+      exposedMethod = true;
+
+      for (var a = 0; a < args.length; a++) {
+        try {
+          var ret = clip.components[method].apply(clip.components, args[a]);
+          if (ret !== false) return true;
+        } catch (e) {
+          lastError = e.toString();
+        }
+      }
+    }
+
+    if (!exposedMethod) {
+      warnings.push('TrackItem components do not expose a preset import/apply method in this Premiere build.');
+    } else if (lastError) {
+      warnings.push('Component preset fallback failed: ' + lastError);
     }
 
     return false;
   }
 
-  function _tryQEApplyPreset(qeClip, file, payload) {
-    var path = file.fsName;
-    var name = payload.presetName || payload.name || '';
-    var attempts = [
-      function () { return qeClip.applyPreset(path, name); },
-      function () { return qeClip.applyPreset(path); },
-      function () { return qeClip.applyPreset(file); },
-      function () { return qeClip.addPreset(path, name); },
-      function () { return qeClip.addPreset(path); },
-      function () { return qeClip.addPreset(file); }
-    ];
+  function _componentCount(clip) {
+    try {
+      if (clip && clip.components && typeof clip.components.numItems !== 'undefined') {
+        return Number(clip.components.numItems);
+      }
+    } catch (e) {}
+    return -1;
+  }
 
-    for (var i = 0; i < attempts.length; i++) {
-      try {
-        var ret = attempts[i]();
-        if (ret !== false) return true;
-      } catch (e) {}
-    }
-    return false;
+  function _componentCountIncreased(clip, beforeCount) {
+    if (beforeCount < 0) return true;
+    var afterCount = _componentCount(clip);
+    if (afterCount < 0) return true;
+    return afterCount > beforeCount;
   }
 
   function _getSelectedClipRefs(seq) {

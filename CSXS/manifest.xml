@@ -7,6 +7,7 @@
 
   <ExtensionList>
     <Extension Id="com.ironfx.panel" Version="1.0.0"/>
+    <Extension Id="com.ironfx.popup" Version="1.0.0"/>
   </ExtensionList>
 
   <ExecutionEnvironment>
@@ -40,6 +41,37 @@
         <UI>
           <Type>Panel</Type>
           <Menu>IronFX</Menu>
+          <Geometry>
+            <Size>
+              <Height>440</Height>
+              <Width>560</Width>
+            </Size>
+            <MinSize>
+              <Height>300</Height>
+              <Width>380</Width>
+            </MinSize>
+          </Geometry>
+        </UI>
+      </DispatchInfo>
+    </Extension>
+
+    <Extension Id="com.ironfx.popup">
+      <DispatchInfo>
+        <Resources>
+          <MainPath>./index.html</MainPath>
+          <ScriptPath>./jsx/IronFX.jsx</ScriptPath>
+          <CEFCommandLine>
+            <Parameter>--allow-file-access-from-files</Parameter>
+            <Parameter>--allow-running-insecure-content</Parameter>
+            <Parameter>--enable-nodejs</Parameter>
+          </CEFCommandLine>
+        </Resources>
+        <Lifecycle>
+          <AutoVisible>true</AutoVisible>
+        </Lifecycle>
+        <UI>
+          <Type>Modeless</Type>
+          <Menu>IronFX Popup</Menu>
           <Geometry>
             <Size>
               <Height>440</Height>

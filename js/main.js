@@ -14,6 +14,7 @@
   'use strict';
 
   var SETTINGS_KEY = 'ironfx.settings.v2';
+  var POPUP_EXTENSION_ID = 'com.ironfx.popup';
   var DEFAULT_SETTINGS = {
     shortcut: 'Ctrl+Space',
     presetDirs: []
@@ -27,6 +28,7 @@
   var ready = false;
   var settings = loadSettings();
   var captureMode = false;
+  var isPopupMode = false;
 
   var $input = document.getElementById('search-input');
   var $list = document.getElementById('results-list');
@@ -54,6 +56,8 @@
   var $saveSettingsBtn = document.getElementById('save-settings-btn');
 
   function init() {
+    isPopupMode = detectPopupMode();
+    document.body.classList.toggle('popup-mode', isPopupMode);
     applySettingsToUI();
     bindEvents();
     loadPresets();
@@ -323,7 +327,11 @@
         if (results[selIdx]) applyEffect(results[selIdx]);
         break;
       case 'Escape':
-        clear();
+        if (isPopupMode && !$input.value && $settingsModal.classList.contains('hidden')) {
+          closePopup();
+        } else {
+          clear();
+        }
         break;
       default:
         break;
@@ -359,7 +367,8 @@
       type: item.type || 'video',
       isPreset: !!item.isPreset,
       presetPath: item.presetPath || '',
-      presetName: item.presetName || item.name || ''
+      presetName: item.presetName || item.name || '',
+      sourceFile: item.sourceFile || ''
     });
 
     cs.evalScript('IronFX.applyEffect(' + JSON.stringify(payload) + ')', function (raw) {
@@ -373,7 +382,7 @@
       }
 
       if (res.error) {
-        setStatus('Error: ' + res.error, 'error');
+        setStatus(formatApplyError(res), 'error');
         console.error('[IronFX] apply error:', res);
         setTimeout(function () { setStatus('Ready', 'idle'); }, 5000);
         return;
@@ -383,7 +392,19 @@
       setStatus('Applied to ' + n + ' clip' + (n !== 1 ? 's' : ''), 'ok');
       setTimeout(function () { setStatus('Ready', 'idle'); }, 2200);
       updateClipStatus();
+      if (isPopupMode) {
+        setTimeout(closePopup, 180);
+      }
     });
+  }
+
+  function formatApplyError(res) {
+    var msg = res && res.error ? String(res.error) : 'Unknown apply error';
+    var warnings = res && res.warnings ? res.warnings : [];
+    if (warnings.length) {
+      msg += ' (' + String(warnings[0]) + ')';
+    }
+    return 'Error: ' + msg;
   }
 
   function startClipPoll() {
@@ -518,6 +539,29 @@
     $statusDot.className = 'dot-' + (state || 'idle');
   }
 
+  function detectPopupMode() {
+    try {
+      if (cs && typeof cs.getExtensionID === 'function' && cs.getExtensionID() === POPUP_EXTENSION_ID) {
+        return true;
+      }
+    } catch (e1) {}
+
+    try {
+      return /[?&]mode=popup\b|popup\.html/i.test(window.location.href);
+    } catch (e2) {
+      return false;
+    }
+  }
+
+  function closePopup() {
+    if (!isPopupMode) return;
+    try {
+      if (cs && typeof cs.closeExtension === 'function') {
+        cs.closeExtension();
+      }
+    } catch (e) {}
+  }
+
   function escapeHtml(value) {
     return String(value == null ? '' : value)
       .replace(/&/g, '&amp;')
@@ -529,7 +573,8 @@
 
   window.IronFXPanel = {
     reloadIndex: loadPresets,
-    openSettings: openSettings
+    openSettings: openSettings,
+    isPopupMode: function () { return isPopupMode; }
   };
 
   if (document.readyState === 'loading') {
