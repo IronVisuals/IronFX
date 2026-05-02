@@ -1,0 +1,11 @@
+# Ignore Excalibur and Spellbook source folders added to this repo
+knights_of_the_editing_table.excalibur/
+knights_of_the_editing_table.spellbook/
+
+# Ignore local helper output and logs
+tools/*.log
+
+# Ignore node modules and cache (standard)
+node_modules/
+npm-debug.log*
+package-lock.json

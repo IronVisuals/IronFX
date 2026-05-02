@@ -768,12 +768,26 @@ var IronFX = (function () {
       return null;
     }
 
-    try { $.sleep(80); } catch (ignore) {}
+    // wait and retry for the effect to appear on the clip components (QE updates can be async)
+    for (var attempt = 0; attempt < 6; attempt++) {
+      try { $.sleep(90); } catch (ignore) {}
+      var added = _getComponentAt(clip, beforeCount);
+      if (added) return added;
+      var found = _findExistingPresetComponent(clip, effectBlock);
+      if (found) return found;
+    }
 
-    var added = _getComponentAt(clip, beforeCount);
-    if (added) return added;
+    // last-ditch attempt: check signature change to detect any component mutation
+    var beforeSig = _componentSignature(clip);
+    if (_componentSignatureChanged(clip, beforeSig, 6)) {
+      var added2 = _getComponentAt(clip, beforeCount);
+      if (added2) return added2;
+      var found2 = _findExistingPresetComponent(clip, effectBlock);
+      if (found2) return found2;
+    }
 
-    return _findExistingPresetComponent(clip, effectBlock);
+    warnings.push('Could not observe newly-added preset component for ' + effectBlock.matchName + '.');
+    return null;
   }
 
   function _isFixedEffectName(displayName, matchName) {
@@ -1120,9 +1134,15 @@ var IronFX = (function () {
     return /^(AE|PR|BE|ADBE)\./i.test(s);
   }
 
-  function _componentSignatureChanged(clip, before) {
-    try { $.sleep(90); } catch (e) {}
-    return _componentSignature(clip) !== before;
+  function _componentSignatureChanged(clip, before, attempts) {
+    attempts = Number(attempts) || 6;
+    try {
+      for (var i = 0; i < attempts; i++) {
+        try { $.sleep(90); } catch (e) {}
+        if (_componentSignature(clip) !== before) return true;
+      }
+    } catch (e) {}
+    return false;
   }
 
   function _componentCount(clip) {
