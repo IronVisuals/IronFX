@@ -11,6 +11,6 @@
     "unlink:mac": "rm \"$HOME/Library/Application Support/Adobe/CEP/extensions/com.ironfx.plugin\"",
     "enable-debug:win": "reg add \"HKCU\\Software\\Adobe\\CSXS.11\" /v PlayerDebugMode /t REG_SZ /d 1 /f",
     "hotkey:win": "powershell -ExecutionPolicy Bypass -File tools\\IronFXHotkey.ps1",
-    "check": "node --check js/main.js && node --check js/effects-db.js"
+    "check": "node --check js/main.js && node --check js/listener.js && node --check js/effects-db.js"
   }
 }

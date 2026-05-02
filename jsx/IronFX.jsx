@@ -507,6 +507,9 @@ var IronFX = (function () {
           return 'applied';
         }
 
+        var parsedState = _applyParsedPresetToRef(qeClip, f, payload, ref.kind, ref.clip, warnings);
+        if (parsedState === 'applied' || parsedState === 'partial') return parsedState;
+
         if (_applyPresetBaseEffectsFromFile(qeClip, f, payload, ref.kind, ref.clip, warnings)) {
           return 'partial';
         }
@@ -628,6 +631,426 @@ var IronFX = (function () {
     return false;
   }
 
+  function _applyParsedPresetToRef(qeClip, file, payload, kind, clip, warnings) {
+    var effectBlocks = _extractPresetEffectBlocks(file, payload, kind, warnings);
+    if (!effectBlocks.length) return 'none';
+
+    var before = _componentSignature(clip);
+    var paramChanged = false;
+
+    for (var i = 0; i < effectBlocks.length; i++) {
+      var block = effectBlocks[i];
+      var component = _ensurePresetComponent(qeClip, clip, block, kind, warnings);
+      if (!component) continue;
+
+      if (_applyPresetParamsToComponent(component, block.paramsText, clip, warnings)) {
+        paramChanged = true;
+      }
+    }
+
+    if (paramChanged) return 'applied';
+
+    if (_componentSignature(clip) !== before) {
+      warnings.push('The preset parser added base effect(s), but no saved parameter values/keyframes could be mapped to scriptable Premiere parameters.');
+      return 'partial';
+    }
+
+    return 'none';
+  }
+
+  function _extractPresetEffectBlocks(file, payload, kind, warnings) {
+    var text = _readFileText(file, warnings);
+    var blockText = _findPresetTextBlock(text, payload.presetName || payload.name || _basename(file.name), kind);
+    var out = [];
+
+    if (!blockText) return out;
+
+    var guid = kind === 'audio'
+      ? '80b8e3d5-6dca-4195-aefb-cb5f407ab009'
+      : '228cda18-3625-4d2d-951e-348879e4ed93';
+    var effectRe = new RegExp(guid + '\\s+\\d+\\s+((?:AE|PR|BE|ADBE)\\.[\\s\\S]*?)\\s+\\d+\\s+((?:AE|PR|BE|ADBE)\\.[\\s\\S]*?)\\s+false\\s+([\\s\\S]*?)\\s+false', 'ig');
+    var matches = [];
+    var m;
+
+    while ((m = effectRe.exec(blockText)) !== null) {
+      var matchName = _cleanPresetName(m[1]);
+      var repeatedMatchName = _cleanPresetName(m[2]);
+      var displayName = _cleanPresetName(m[3]);
+
+      if (!_looksLikeEffectMatchName(matchName)) continue;
+      if (_looksLikeEffectMatchName(repeatedMatchName) && repeatedMatchName !== matchName) continue;
+
+      matches.push({
+        start: m.index,
+        end: effectRe.lastIndex,
+        matchName: matchName,
+        displayName: displayName
+      });
+
+      if (matches.length > 80) break;
+    }
+
+    for (var i = 0; i < matches.length; i++) {
+      var end = i + 1 < matches.length ? matches[i + 1].start : blockText.length;
+      out.push({
+        matchName: matches[i].matchName,
+        displayName: matches[i].displayName,
+        paramsText: blockText.substring(matches[i].end, end)
+      });
+    }
+
+    return out;
+  }
+
+  function _findPresetTextBlock(text, presetName, kind) {
+    if (!text) return '';
+
+    var desired = _cleanPresetName(presetName).toLowerCase();
+    var mediaGuid = '(228cda18-3625-4d2d-951e-348879e4ed93|80b8e3d5-6dca-4195-aefb-cb5f407ab009)';
+    var headerRe = new RegExp('(?:^|\\s)(?:true|false)\\s+false\\s+\\d+\\s+false\\s+(.{2,140}?)\\s+false\\s+\\d+\\s+\\d+\\s+\\d+(?:\\.\\d*)?\\s+\\d{10,}\\s+\\d+\\s+' + mediaGuid, 'ig');
+    var headers = [];
+    var m;
+
+    while ((m = headerRe.exec(text)) !== null) {
+      var guid = String(m[2] || '').toLowerCase();
+      var type = guid === '80b8e3d5-6dca-4195-aefb-cb5f407ab009' ? 'audio' : 'video';
+      headers.push({
+        index: m.index,
+        name: _cleanPresetName(m[1]),
+        type: type
+      });
+      if (headers.length > 5000) break;
+    }
+
+    for (var i = 0; i < headers.length; i++) {
+      if (headers[i].type !== kind) continue;
+      if (headers[i].name.toLowerCase() !== desired) continue;
+
+      var next = text.length;
+      for (var j = i + 1; j < headers.length; j++) {
+        if (headers[j].type === kind) {
+          next = headers[j].index;
+          break;
+        }
+      }
+      return text.substring(headers[i].index, next);
+    }
+
+    return '';
+  }
+
+  function _ensurePresetComponent(qeClip, clip, effectBlock, kind, warnings) {
+    var existingFixed = _findExistingPresetComponent(clip, effectBlock);
+    if (existingFixed && _isFixedEffectName(effectBlock.displayName, effectBlock.matchName)) {
+      return existingFixed;
+    }
+
+    var beforeCount = _componentCount(clip);
+    var effectPayload = {
+      name: effectBlock.displayName || effectBlock.matchName,
+      matchName: effectBlock.matchName
+    };
+    var effect = kind === 'audio' ? _findAudioEffect(effectPayload) : _findVideoEffect(effectPayload);
+
+    if (!effect) {
+      warnings.push('Could not resolve preset effect ' + effectBlock.matchName + ' (' + effectBlock.displayName + ').');
+      return null;
+    }
+
+    try {
+      if (kind === 'audio' && typeof qeClip.addAudioEffect === 'function') {
+        qeClip.addAudioEffect(effect);
+      } else if (kind !== 'audio' && typeof qeClip.addVideoEffect === 'function') {
+        qeClip.addVideoEffect(effect);
+      }
+    } catch (e) {
+      warnings.push('Could not add preset effect ' + effectBlock.matchName + ': ' + e.toString());
+      return null;
+    }
+
+    try { $.sleep(80); } catch (ignore) {}
+
+    var added = _getComponentAt(clip, beforeCount);
+    if (added) return added;
+
+    return _findExistingPresetComponent(clip, effectBlock);
+  }
+
+  function _isFixedEffectName(displayName, matchName) {
+    var s = (String(displayName || '') + ' ' + String(matchName || '')).toLowerCase();
+    return s.indexOf('motion') !== -1 ||
+           s.indexOf('opacity') !== -1 ||
+           s.indexOf('volume') !== -1 ||
+           s.indexOf('time remapping') !== -1 ||
+           s.indexOf('timeremapping') !== -1;
+  }
+
+  function _findExistingPresetComponent(clip, effectBlock) {
+    try {
+      if (!clip || !clip.components) return null;
+      var count = _componentCount(clip);
+      for (var i = count - 1; i >= 0; i--) {
+        var component = _getComponentAt(clip, i);
+        if (!component) continue;
+        var matchName = _safeProp(component, 'matchName');
+        var displayName = _safeProp(component, 'displayName');
+        if (matchName && effectBlock.matchName && matchName === effectBlock.matchName) return component;
+        if (displayName && effectBlock.displayName && displayName === effectBlock.displayName) return component;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function _applyPresetParamsToComponent(component, paramsText, clip, warnings) {
+    var paramBlocks = _parsePresetParamBlocks(paramsText);
+    var changed = false;
+
+    for (var i = 0; i < paramBlocks.length; i++) {
+      var presetParam = paramBlocks[i];
+      var componentParam = _findComponentParam(component, presetParam.name);
+      if (!componentParam) continue;
+
+      if (_applyPresetParamValue(componentParam, presetParam, clip, warnings)) {
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
+  function _parsePresetParamBlocks(text) {
+    var out = [];
+    if (!text) return out;
+
+    var paramRe = /(\d+)\s+false\s+false\s+false\s+([\s\S]{1,90}?)\s+(\d+)\s+([\s\S]*?)(?=\s+\d+\s+false\s+false\s+false\s+[\s\S]{1,90}?\s+\d+\s+|$)/g;
+    var m;
+
+    while ((m = paramRe.exec(text)) !== null) {
+      var name = _cleanPresetName(m[2]);
+      if (!_looksLikePresetParamName(name)) continue;
+      out.push({
+        id: m[1],
+        name: name,
+        controlType: Number(m[3]),
+        data: m[4]
+      });
+      if (out.length > 500) break;
+    }
+
+    return out;
+  }
+
+  function _looksLikePresetParamName(name) {
+    if (!name || name.length > 90) return false;
+    if (/^(true|false|null|undefined)$/i.test(name)) return false;
+    if (/^-?\d+(\.\d*)?$/.test(name)) return false;
+    if (/^(AE|PR|BE|ADBE)\./i.test(name)) return false;
+    return true;
+  }
+
+  function _findComponentParam(component, presetName) {
+    var wanted = _normalizeParamName(presetName);
+    try {
+      if (!component || !component.properties) return null;
+      var props = component.properties;
+      var count = Number(props.numItems || props.length || 0);
+
+      for (var i = 0; i < count; i++) {
+        var p = props[i];
+        if (!p) continue;
+        if (_normalizeParamName(_safeProp(p, 'displayName')) === wanted) return p;
+      }
+
+      for (var j = 0; j < count; j++) {
+        var p2 = props[j];
+        var normalized = _normalizeParamName(_safeProp(p2, 'displayName'));
+        if (normalized && (normalized.indexOf(wanted) !== -1 || wanted.indexOf(normalized) !== -1)) return p2;
+      }
+    } catch (e) {}
+    return null;
+  }
+
+  function _normalizeParamName(name) {
+    return String(name || '').toLowerCase().replace(/[^a-z0-9]+/g, '');
+  }
+
+  function _applyPresetParamValue(param, presetParam, clip, warnings) {
+    var keyframes = _extractPresetKeyframes(presetParam.data);
+    var staticValue = keyframes.length ? keyframes[0].value : _extractStaticPresetValue(presetParam.data);
+    if (staticValue === null || typeof staticValue === 'undefined') return false;
+
+    try {
+      if (keyframes.length > 0 && typeof param.setTimeVarying === 'function' && _paramSupportsKeyframes(param)) {
+        var baseTicks = _firstPresetKeyTicks(keyframes);
+        var clipStartTicks = _clipStartTicks(clip);
+
+        param.setTimeVarying(true);
+        _clearParamKeyframes(param);
+
+        for (var i = 0; i < keyframes.length; i++) {
+          var targetTicks = _offsetPresetKeyTicks(keyframes[i].ticks, baseTicks, clipStartTicks);
+          var t = _timeFromTicks(targetTicks);
+          try { param.addKey(t); } catch (ignoreAddKey) {}
+          param.setValueAtKey(t, keyframes[i].value, 1);
+          if (typeof param.setInterpolationTypeAtKey === 'function' && keyframes[i].interpolation !== null) {
+            try { param.setInterpolationTypeAtKey(t, keyframes[i].interpolation, 1); } catch (ignoreInterp) {}
+          }
+        }
+        return true;
+      }
+
+      if (_looksLikeColorParam(param, presetParam, staticValue) && staticValue instanceof Array && staticValue.length >= 3 && typeof param.setColorValue === 'function') {
+        var color = _coerceColorArray(staticValue);
+        param.setColorValue(color[0], color[1], color[2], color[3], 1);
+        return true;
+      }
+
+      if (typeof param.setValue === 'function') {
+        param.setValue(staticValue, 1);
+        return true;
+      }
+    } catch (e) {
+      warnings.push('Could not set preset parameter ' + presetParam.name + ': ' + e.toString());
+    }
+
+    return false;
+  }
+
+  function _clearParamKeyframes(param) {
+    try {
+      if (!param || typeof param.getKeys !== 'function' || typeof param.removeKey !== 'function') return;
+      var keys = param.getKeys();
+      if (!(keys instanceof Array)) return;
+      for (var i = keys.length - 1; i >= 0; i--) {
+        try { param.removeKey(keys[i]); } catch (ignoreRemove) {}
+      }
+    } catch (e) {}
+  }
+
+  function _paramSupportsKeyframes(param) {
+    try {
+      if (typeof param.areKeyframesSupported === 'function') return !!param.areKeyframesSupported();
+    } catch (e) {}
+    return false;
+  }
+
+  function _extractPresetKeyframes(data) {
+    var out = [];
+    var re = /(-?\d{10,}),([^,\s]+(?::[^,\s]+)*)/g;
+    var m;
+
+    while ((m = re.exec(data || '')) !== null) {
+      var ticks = m[1];
+      if (ticks === '-91445760000000000') continue;
+      var value = _parsePresetScalarOrVector(m[2]);
+      if (value === null || typeof value === 'undefined') continue;
+      out.push({ ticks: ticks, value: value, interpolation: _extractInterpolationNear(data, re.lastIndex) });
+      if (out.length > 200) break;
+    }
+
+    return out;
+  }
+
+  function _firstPresetKeyTicks(keyframes) {
+    if (!keyframes || !keyframes.length) return null;
+    return String(keyframes[0].ticks);
+  }
+
+  function _clipStartTicks(clip) {
+    try {
+      if (clip && clip.start && typeof clip.start.ticks !== 'undefined') return String(clip.start.ticks);
+    } catch (e1) {}
+    try {
+      if (clip && clip.start && typeof clip.start.seconds !== 'undefined') {
+        return String(Math.round(Number(clip.start.seconds) * 254016000000));
+      }
+    } catch (e2) {}
+    return null;
+  }
+
+  function _offsetPresetKeyTicks(ticks, baseTicks, clipStartTicks) {
+    if (baseTicks === null || clipStartTicks === null) return String(ticks);
+    var raw = Number(ticks);
+    var base = Number(baseTicks);
+    var start = Number(clipStartTicks);
+    if (isNaN(raw) || isNaN(base) || isNaN(start)) return String(ticks);
+    return String(Math.round(start + (raw - base)));
+  }
+
+  function _extractStaticPresetValue(data) {
+    var re = /-91445760000000000,([^,\s]+(?::[^,\s]+)*)/g;
+    var m;
+    var last = null;
+
+    while ((m = re.exec(data || '')) !== null) {
+      last = _parsePresetScalarOrVector(m[1]);
+    }
+
+    return last;
+  }
+
+  function _parsePresetScalarOrVector(value) {
+    var s = String(value || '');
+    if (!s) return null;
+
+    if (s.indexOf(':') !== -1) {
+      var parts = s.split(':');
+      var arr = [];
+      for (var i = 0; i < parts.length; i++) {
+        var n = Number(parts[i]);
+        if (isNaN(n)) return null;
+        arr.push(n);
+      }
+      return arr;
+    }
+
+    if (/^(true|false)$/i.test(s)) return /^true$/i.test(s);
+
+    var num = Number(s);
+    if (!isNaN(num)) return num;
+    return null;
+  }
+
+  function _extractInterpolationNear(data, index) {
+    try {
+      var tail = String(data || '').substring(index, index + 80);
+      var m = tail.match(/,\d+,\d+,\d+,\d+,\d+,\d+,(\d+)/);
+      if (m) return Number(m[1]);
+    } catch (e) {}
+    return null;
+  }
+
+  function _timeFromTicks(ticks) {
+    var t = new Time();
+    try {
+      t.ticks = String(ticks);
+    } catch (e) {}
+    return t;
+  }
+
+  function _looksLikeColorParam(param, presetParam, value) {
+    if (!(value instanceof Array) || value.length < 3) return false;
+    var s = (_safeProp(param, 'displayName') + ' ' + presetParam.name).toLowerCase();
+    return s.indexOf('color') !== -1 || s.indexOf('colour') !== -1 || s.indexOf('tint') !== -1;
+  }
+
+  function _coerceColorArray(value) {
+    var a = value instanceof Array ? value : [];
+    var alpha = a.length > 3 ? a[3] : 255;
+    var red = a.length > 0 ? a[0] : 0;
+    var green = a.length > 1 ? a[1] : red;
+    var blue = a.length > 2 ? a[2] : green;
+
+    if (red <= 1 && green <= 1 && blue <= 1 && alpha <= 1) {
+      alpha = Math.round(alpha * 255);
+      red = Math.round(red * 255);
+      green = Math.round(green * 255);
+      blue = Math.round(blue * 255);
+    }
+
+    return [alpha, red, green, blue];
+  }
+
   function _applyPresetBaseEffectsFromFile(qeClip, file, payload, kind, clip, warnings) {
     var effects = _extractEffectRefsFromPresetFile(file, kind, warnings);
     if (!effects.length) return false;
@@ -700,6 +1123,22 @@ var IronFX = (function () {
   function _componentSignatureChanged(clip, before) {
     try { $.sleep(90); } catch (e) {}
     return _componentSignature(clip) !== before;
+  }
+
+  function _componentCount(clip) {
+    try {
+      if (!clip || !clip.components) return 0;
+      return Number(clip.components.numItems || clip.components.length || 0);
+    } catch (e) {}
+    return 0;
+  }
+
+  function _getComponentAt(clip, index) {
+    try {
+      if (!clip || !clip.components || index < 0) return null;
+      return clip.components[index] || null;
+    } catch (e) {}
+    return null;
   }
 
   function _componentSignature(clip) {
@@ -879,11 +1318,12 @@ var IronFX = (function () {
     return JSON.stringify(result);
   }
 
-  function keepLoaded() {
+  function keepLoaded(extensionId) {
     var result = { ok: true, warnings: [] };
+    var id = extensionId || 'com.ironfx.panel';
     try {
       if (app && typeof app.setExtensionPersistent === 'function') {
-        app.setExtensionPersistent('com.ironfx.panel', 1);
+        app.setExtensionPersistent(id, 1);
       } else {
         result.warnings.push('app.setExtensionPersistent is unavailable in this host.');
       }

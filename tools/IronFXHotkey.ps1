@@ -21,12 +21,18 @@ using System.Windows.Forms;
 namespace IronFX {
   public sealed class HotkeyForm : Form {
     private const int WM_HOTKEY = 0x0312;
+    private const int WM_KEYDOWN = 0x0100;
+    private const int WM_SYSKEYDOWN = 0x0104;
     private const int HOTKEY_OPEN = 1;
     private const int HOTKEY_QUIT = 2;
     private const int HOTKEY_OPEN_BRACKET = 3;
+    private const int WH_KEYBOARD_LL = 13;
     private const uint MOD_ALT = 0x0001;
     private const uint MOD_CONTROL = 0x0002;
     private const uint MOD_SHIFT = 0x0004;
+    private const int VK_CONTROL = 0x11;
+    private const int VK_LCONTROL = 0xA2;
+    private const int VK_RCONTROL = 0xA3;
     private const uint VK_SPACE = 0x20;
     private const uint VK_OEM_4 = 0xDB; // [ key on US/ABNT-style keyboards.
     private const uint VK_Q = 0x51;
@@ -35,6 +41,10 @@ namespace IronFX {
     private readonly int port;
 
     private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+    private delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
+    private readonly LowLevelKeyboardProc keyboardProc;
+    private IntPtr keyboardHook = IntPtr.Zero;
+    private long lastNotifyTicks = 0;
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
@@ -66,14 +76,39 @@ namespace IronFX {
     [DllImport("user32.dll")]
     private static extern bool GetCursorPos(out POINT point);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelKeyboardProc lpfn, IntPtr hMod, uint dwThreadId);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
     [StructLayout(LayoutKind.Sequential)]
     private struct POINT {
       public int X;
       public int Y;
     }
 
+    [StructLayout(LayoutKind.Sequential)]
+    private struct KBDLLHOOKSTRUCT {
+      public uint vkCode;
+      public uint scanCode;
+      public uint flags;
+      public uint time;
+      public IntPtr dwExtraInfo;
+    }
+
     public HotkeyForm(int port) {
       this.port = port;
+      keyboardProc = HookCallback;
       ShowInTaskbar = false;
       WindowState = FormWindowState.Minimized;
       FormBorderStyle = FormBorderStyle.FixedToolWindow;
@@ -95,12 +130,17 @@ namespace IronFX {
       if (!RegisterHotKey(Handle, HOTKEY_QUIT, MOD_CONTROL | MOD_ALT | MOD_SHIFT, VK_Q)) {
         Console.WriteLine("Could not register Ctrl+Alt+Shift+Q stop shortcut.");
       }
+      InstallKeyboardHook();
     }
 
     protected override void OnHandleDestroyed(EventArgs e) {
       UnregisterHotKey(Handle, HOTKEY_OPEN);
       UnregisterHotKey(Handle, HOTKEY_OPEN_BRACKET);
       UnregisterHotKey(Handle, HOTKEY_QUIT);
+      if (keyboardHook != IntPtr.Zero) {
+        UnhookWindowsHookEx(keyboardHook);
+        keyboardHook = IntPtr.Zero;
+      }
       base.OnHandleDestroyed(e);
     }
 
@@ -109,7 +149,7 @@ namespace IronFX {
         int id = m.WParam.ToInt32();
         if (id == HOTKEY_OPEN || id == HOTKEY_OPEN_BRACKET) {
           if (IsPremiereForeground()) {
-            Task.Run(() => NotifyIronFX());
+            NotifyIronFXDebounced();
           }
           return;
         }
@@ -119,6 +159,46 @@ namespace IronFX {
         }
       }
       base.WndProc(ref m);
+    }
+
+    private void InstallKeyboardHook() {
+      try {
+        using (Process curProcess = Process.GetCurrentProcess())
+        using (ProcessModule curModule = curProcess.MainModule) {
+          keyboardHook = SetWindowsHookEx(WH_KEYBOARD_LL, keyboardProc, GetModuleHandle(curModule.ModuleName), 0);
+        }
+        if (keyboardHook == IntPtr.Zero) {
+          Console.WriteLine("Could not install keyboard hook fallback.");
+        }
+      } catch {
+        Console.WriteLine("Could not install keyboard hook fallback.");
+      }
+    }
+
+    private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam) {
+      if (nCode >= 0 && (wParam == (IntPtr)WM_KEYDOWN || wParam == (IntPtr)WM_SYSKEYDOWN)) {
+        KBDLLHOOKSTRUCT keyData = (KBDLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(KBDLLHOOKSTRUCT));
+        bool ctrlDown = IsKeyDown(VK_CONTROL) || IsKeyDown(VK_LCONTROL) || IsKeyDown(VK_RCONTROL);
+        bool shouldOpen = ctrlDown && (keyData.vkCode == VK_SPACE || keyData.vkCode == VK_OEM_4);
+
+        if (shouldOpen && IsPremiereForeground()) {
+          NotifyIronFXDebounced();
+          return (IntPtr)1;
+        }
+      }
+
+      return CallNextHookEx(keyboardHook, nCode, wParam, lParam);
+    }
+
+    private bool IsKeyDown(int key) {
+      return (GetAsyncKeyState(key) & 0x8000) != 0;
+    }
+
+    private void NotifyIronFXDebounced() {
+      long now = DateTime.UtcNow.Ticks;
+      if (now - lastNotifyTicks < TimeSpan.FromMilliseconds(350).Ticks) return;
+      lastNotifyTicks = now;
+      Task.Run(() => NotifyIronFX());
     }
 
     private bool IsPremiereForeground() {
